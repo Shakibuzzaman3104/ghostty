@@ -39,8 +39,9 @@ final class GitStatsWatcher {
     private var fallbackTimer: Timer?
 
     private init() {
-        // 30-second fallback poll to self-correct if FSEvents misses something.
-        fallbackTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+        // Fallback poll to self-correct if FSEvents misses something. FSEvents
+        // covers local disks, so this only needs to be occasional.
+        fallbackTimer = Timer.scheduledTimer(withTimeInterval: 120.0, repeats: true) { [weak self] _ in
             self?.refreshAll()
         }
     }
@@ -191,7 +192,7 @@ private final class ProjectWatcher {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: item)
     }
 
-    /// Force an immediate refresh (used by the 30s fallback timer).
+    /// Force an immediate refresh (used by the fallback timer).
     func refreshNow() {
         debounceWorkItem?.cancel()
         debounceWorkItem = nil

@@ -655,8 +655,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard config.sidebarGit else { return nil }
         if let gitPanelModel { return gitPanelModel }
         let model = GitPanelModel()
+        model.isActive = window?.occlusionState.contains(.visible) ?? false
         gitPanelModel = model
         return model
+    }
+
+    override func windowDidChangeOcclusionState(_ notification: Notification) {
+        super.windowDidChangeOcclusionState(notification)
+        // Hidden tabs (each is its own window) and covered or minimized
+        // windows stop running git for the sidebar panel.
+        gitPanelModel?.isActive = window?.occlusionState.contains(.visible) ?? false
     }
 
     /// Refreshes the sidebar tab manager for all windows in the current tab group.

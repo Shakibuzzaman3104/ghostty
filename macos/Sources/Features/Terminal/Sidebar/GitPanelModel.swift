@@ -38,8 +38,34 @@ final class GitPanelModel: ObservableObject {
     /// The working directory of the selected tab. Setting it re-resolves the repo.
     var pwd: String? {
         didSet {
-            guard pwd != oldValue else { return }
+            guard pwd != oldValue, isActive else { return }
             Task { await refresh() }
+        }
+    }
+
+    /// Whether this panel is on screen. Every tab is its own window with its
+    /// own model, so only the visible one may watch and poll: otherwise each
+    /// open tab ran the same git commands on every change. An inactive model
+    /// keeps its last state and refreshes once when it becomes active.
+    var isActive = false {
+        didSet {
+            guard isActive != oldValue else { return }
+            if isActive {
+                // FSEvents on the repo root drives refreshes; this timer is
+                // only a fallback for changes FSEvents can't see (e.g.
+                // network volumes).
+                timer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+                    Task { @MainActor [weak self] in await self?.refresh() }
+                }
+                Task { await refresh() }
+            } else {
+                timer?.invalidate()
+                timer = nil
+                watcher = nil
+                pendingWatcherRefresh?.cancel()
+                pendingWatcherRefresh = nil
+                firstPendingEvent = nil
+            }
         }
     }
 
@@ -47,14 +73,13 @@ final class GitPanelModel: ObservableObject {
     private var isRefreshing = false
     private var needsRefresh = false
     private var watcher: DirectoryWatcher?
+    private var pendingWatcherRefresh: DispatchWorkItem?
+    private var firstPendingEvent: Date?
 
-    init() {
-        // FSEvents on the repo root drives refreshes; this timer is only a
-        // fallback for changes FSEvents can't see (e.g. network volumes).
-        timer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in await self?.refresh() }
-        }
-    }
+    /// Quiet time after the last file event before refreshing, and the most
+    /// a steady stream of events (a build writing into the repo) can delay it.
+    private static let watcherDebounce: TimeInterval = 0.5
+    private static let watcherMaxDelay: TimeInterval = 5
 
     deinit {
         timer?.invalidate()
@@ -62,7 +87,27 @@ final class GitPanelModel: ObservableObject {
 
     // MARK: - Refresh
 
+    /// Debounce file events: a build touches thousands of files, and running
+    /// git for each burst kept a few git processes alive per second.
+    private func watcherDidFire() {
+        guard isActive else { return }
+        let now = Date()
+        let first = firstPendingEvent ?? now
+        firstPendingEvent = first
+        let delay = min(Self.watcherDebounce, max(0, Self.watcherMaxDelay - now.timeIntervalSince(first)))
+        pendingWatcherRefresh?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.firstPendingEvent = nil
+            self.pendingWatcherRefresh = nil
+            Task { await self.refresh() }
+        }
+        pendingWatcherRefresh = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
     func refresh() async {
+        guard isActive else { return }
         // Coalesce: a refresh requested mid-refresh runs once more at the end
         // instead of being dropped, so a watcher event can't be lost.
         if isRefreshing {
@@ -136,9 +181,9 @@ final class GitPanelModel: ObservableObject {
     /// (Re)start the FSEvents watcher when the repo root changes. Events from
     /// the working tree and .git both land here; FSEvents coalesces bursts.
     private func startWatching(_ root: String) {
-        guard watcher?.path != root else { return }
+        guard isActive, watcher?.path != root else { return }
         watcher = DirectoryWatcher(path: root) { [weak self] in
-            Task { @MainActor [weak self] in await self?.refresh() }
+            Task { @MainActor [weak self] in self?.watcherDidFire() }
         }
     }
 
