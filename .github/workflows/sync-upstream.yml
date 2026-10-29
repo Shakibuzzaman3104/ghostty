@@ -1,0 +1,70 @@
+# Daily merge of ghostty-org/ghostty into main. Clean merges are pushed;
+# conflicts go to a sync/upstream-YYYYMMDD branch with a PR. Needs a SYNC_PAT
+# repository secret (a token with contents + workflows write on this fork).
+# Run scripts/upstream-sync.sh locally before resolving a conflicted PR.
+#
+# Adapted from Pro Plus Ultra (Hankyone/ghostty-pro-plus-ultra, MIT).
+name: Sync Upstream
+
+on:
+  schedule:
+    # Run daily at 06:00 UTC
+    - cron: "0 6 * * *"
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  sync:
+    if: github.repository != 'ghostty-org/ghostty'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_PAT }}
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/ghostty-org/ghostty.git
+          git fetch --no-tags upstream main
+
+      - name: Attempt merge
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git merge upstream/main --no-edit || echo "has_conflicts=true" >> "$GITHUB_OUTPUT"
+
+      - name: Push if clean merge
+        if: steps.merge.outputs.has_conflicts != 'true'
+        run: git push origin main
+
+      - name: Push conflict branch
+        if: steps.merge.outputs.has_conflicts == 'true'
+        run: |
+          git merge --abort
+          git checkout -b sync/upstream-$(date +%Y%m%d)
+          git merge upstream/main --no-commit --no-ff || true
+          git add -A
+          git commit -m "sync: merge upstream ghostty-org/ghostty (conflicts)"
+          git push --force origin sync/upstream-$(date +%Y%m%d)
+
+      - name: Create PR for conflicts
+        if: steps.merge.outputs.has_conflicts == 'true'
+        run: |
+          gh pr create \
+            --repo ${{ github.repository }} \
+            --head sync/upstream-$(date +%Y%m%d) \
+            --title "Upstream sync — manual conflict resolution needed" \
+            --body "$(cat <<'EOF'
+          Automated daily sync from [ghostty-org/ghostty](https://github.com/ghostty-org/ghostty).
+
+          This PR has merge conflicts that need manual resolution.
+          EOF
+          )"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
