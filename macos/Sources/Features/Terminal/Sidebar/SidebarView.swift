@@ -449,10 +449,25 @@ private struct ProjectSection: View {
                     onGitCommitAndPush: group.projectRoot != nil ? {
                         tabManager.gitCommitAndPush(projectRoot: group.projectRoot!)
                     } : nil,
+                    onCloseProject: { tabManager.closeProject(group) },
                     gitActionStatus: tabManager.gitActionStatus(forProjectRoot: group.projectRoot)
                 )
             }
             .buttonStyle(.plain)
+            .contextMenu {
+                Button("New Terminal") {
+                    tabManager.createNewTab(projectRoot: group.launchDirectory)
+                }
+                if let root = group.projectRoot {
+                    Button("Open in Finder") {
+                        NSWorkspace.shared.open(URL(fileURLWithPath: root))
+                    }
+                }
+                Divider()
+                Button(SidebarTabManager.closeGroupTitle(group)) {
+                    tabManager.closeProject(group)
+                }
+            }
             .onHover { isHovering in
                 hoveredGroupID = isHovering ? group.id : nil
             }
@@ -867,6 +882,7 @@ private struct ProjectHeader: View {
     var onGitCommit: (() -> Void)? = nil
     var onGitPush: (() -> Void)? = nil
     var onGitCommitAndPush: (() -> Void)? = nil
+    var onCloseProject: (() -> Void)? = nil
     var gitActionStatus: SidebarTabManager.GitActionStatus? = nil
     @State private var isNewTabHovered = false
 
@@ -998,6 +1014,16 @@ private struct ProjectHeader: View {
                             .labelStyle(.titleAndIcon)
                         }
                         .disabled(gitActionInProgress || group.gitDiffStats == nil)
+                    }
+
+                    if let onCloseProject {
+                        Divider()
+                        Button {
+                            onCloseProject()
+                        } label: {
+                            Label(SidebarTabManager.closeGroupTitle(group), systemImage: "xmark.circle")
+                                .labelStyle(.titleAndIcon)
+                        }
                     }
                 } label: {
                     ZStack {

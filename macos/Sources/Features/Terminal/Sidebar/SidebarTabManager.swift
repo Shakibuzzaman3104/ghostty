@@ -716,6 +716,50 @@ class SidebarTabManager: ObservableObject {
         }
     }
 
+    /// Menu title for `closeProject`: Home and Other are not projects.
+    static func closeGroupTitle(_ group: ProjectGroup) -> String {
+        group.projectRoot != nil ? "Close Project" : "Close All Tabs in \(group.name)"
+    }
+
+    /// Close every tab in a project group, which takes the project off the
+    /// list (it moves to Recent). One prompt for the whole group instead of
+    /// one per busy tab; each closed tab can still be brought back with Undo.
+    func closeProject(_ group: ProjectGroup) {
+        let controllers = group.tabs.compactMap {
+            window(for: $0)?.windowController as? TerminalController
+        }
+        guard !controllers.isEmpty else { return }
+        let closeAll = { controllers.forEach { $0.closeTabImmediately() } }
+
+        let busy = controllers.filter { $0.surfaceTree.contains(where: { $0.needsConfirmQuit }) }.count
+        guard controllers.count > 1 || busy > 0 else {
+            closeAll()
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "Close \(group.name)?"
+        let tabs = controllers.count == 1 ? "1 tab" : "\(controllers.count) tabs"
+        switch busy {
+        case 0:
+            alert.informativeText = "This closes \(tabs)."
+        case 1:
+            alert.informativeText = "This closes \(tabs). One of them is still running a process, which will be killed."
+        default:
+            alert.informativeText = "This closes \(tabs). \(busy) of them are still running a process, which will be killed."
+        }
+        alert.alertStyle = busy > 0 ? .warning : .informational
+        alert.addButton(withTitle: "Close")
+        alert.addButton(withTitle: "Cancel")
+        if let window {
+            alert.beginSheetModal(for: window) { response in
+                if response == .alertFirstButtonReturn { closeAll() }
+            }
+        } else if alert.runModal() == .alertFirstButtonReturn {
+            closeAll()
+        }
+    }
+
     func closeTabsToTheRight(of tab: TabItem) {
         guard let window else { return }
         let tabWindows = store.orderedTabWindows(for: window)
