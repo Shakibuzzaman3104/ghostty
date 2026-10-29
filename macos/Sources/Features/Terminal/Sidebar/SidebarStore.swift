@@ -306,6 +306,7 @@ final class SidebarStore {
             return group.managers.first?.tabs.compactMap(\.projectRoot) ?? []
         })
         gitStatsWatcher.sync(projectRoots: activeRoots)
+        RecentProjectsStore.shared.sync(openRoots: activeRoots)
     }
 
     /// One fingerprint over every tab group: window identity/order, titles,

@@ -280,6 +280,8 @@ struct SidebarView: View {
                         groupDropTarget: $dragState.groupDropTarget
                     ))
                 }
+
+                RecentProjectsSection(tabManager: tabManager, theme: theme)
             }
             .padding(.horizontal, 8)
             .padding(.top, 8)
@@ -762,6 +764,81 @@ private struct ThreadRow: View {
                 guard let idx = tabManager.tabs.firstIndex(where: { $0.id == tab.id }) else { return true }
                 return idx >= tabManager.tabs.count - 1
             }())
+        }
+    }
+}
+
+// MARK: - RecentProjectsSection
+
+/// Projects used recently that have no open tab. Clicking one opens a tab
+/// there; the list itself lives in `RecentProjectsStore`.
+private struct RecentProjectsSection: View {
+    let tabManager: SidebarTabManager
+    let theme: SidebarTheme
+    @ObservedObject private var store = RecentProjectsStore.shared
+    @AppStorage("SidebarRecentCollapsed") private var isCollapsed = false
+    @State private var hoveredPath: String?
+
+    var body: some View {
+        if !store.recent.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                Button {
+                    isCollapsed.toggle()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                            .font(.system(size: 8, weight: .semibold))
+                        Text("Recent")
+                            .font(.system(size: 11, weight: .medium))
+                        Spacer()
+                    }
+                    .foregroundColor(theme.secondaryText.opacity(0.7))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+
+                if !isCollapsed {
+                    ForEach(store.recent) { entry in
+                        recentRow(entry)
+                    }
+                }
+            }
+            .padding(.top, 10)
+        }
+    }
+
+    private func recentRow(_ entry: RecentProjectsStore.Entry) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 9))
+                .foregroundColor(theme.secondaryText.opacity(0.6))
+            Text(entry.name)
+                .font(.system(size: 11))
+                .foregroundColor(hoveredPath == entry.path ? theme.foreground : theme.secondaryText)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer()
+        }
+        .frame(height: 24)
+        .padding(.horizontal, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(hoveredPath == entry.path ? theme.foreground.opacity(0.04) : .clear)
+        )
+        .contentShape(Rectangle())
+        .help(entry.path)
+        .onHover { hoveredPath = $0 ? entry.path : nil }
+        .onTapGesture { tabManager.createNewTab(projectRoot: entry.path) }
+        .contextMenu {
+            Button("Open in New Tab") { tabManager.createNewTab(projectRoot: entry.path) }
+            Button("Open in Finder") {
+                NSWorkspace.shared.open(URL(fileURLWithPath: entry.path))
+            }
+            Divider()
+            Button("Remove from Recent") { store.remove(entry.path) }
+            Button("Clear Recent") { store.clear() }
         }
     }
 }
