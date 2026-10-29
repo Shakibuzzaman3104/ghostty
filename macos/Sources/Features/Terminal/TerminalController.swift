@@ -5,7 +5,7 @@ import Combine
 import GhosttyKit
 
 /// A classic, tabbed terminal experience.
-class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Controller {
+class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Controller, NSSplitViewDelegate {
     override var windowNibName: NSNib.Name? {
         let defaultValue = "Terminal"
 
@@ -60,6 +60,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     /// The notification cancellable for focused surface property changes.
     private var surfaceAppearanceCancellables: Set<AnyCancellable> = []
+
+    /// The sidebar tab manager that tracks tabs for the sidebar view.
+    private(set) var sidebarTabManager: SidebarTabManager?
+
+    /// The sidebar hosting view, kept for theme updates on config change.
+    private var sidebarHostingView: NSHostingView<SidebarView>?
+
+    /// The sidebar's background material layer, kept so config reloads can
+    /// re-apply `sidebar-opacity` without rebuilding the view hierarchy.
+    private weak var sidebarEffectView: NSVisualEffectView?
 
     init(_ ghostty: Ghostty.App,
          withBaseConfig base: Ghostty.SurfaceConfiguration? = nil,
@@ -559,6 +569,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             Notification.Name.GhosttyConfigChangeKey
         ] as? Ghostty.Config else { return }
 
+        // Update sidebar theme from the new config colors
+        updateSidebarTheme(config)
+
         // If this is an app-level config update then we update some things.
         if notification.object == nil {
             // Update our derived config
@@ -592,7 +605,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// shortcut that activates it (if any). This is called when the key window
     /// changes, when a window is closed, and when tabs are reordered
     /// with the mouse.
-    func relabelTabs() {
+    func relabelTabs(refreshSidebars: Bool = true) {
         // We only listen for frame changes if we have more than 1 window,
         // otherwise the accessory view doesn't matter.
         tabListenForFrame = window?.tabbedWindows?.count ?? 0 > 1
@@ -611,6 +624,35 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 } else {
                     window.keyEquivalent = ""
                 }
+            }
+        }
+
+        if refreshSidebars {
+            // Structural tab changes still need a full sidebar refresh so order and
+            // metadata stay in sync, but pure selection changes should not pay that cost.
+            refreshAllSidebars()
+        }
+    }
+
+    /// Updates the sidebar theme when the terminal config changes.
+    private func updateSidebarTheme(_ config: Ghostty.Config) {
+        guard let sidebarHostingView, let sidebarTabManager else { return }
+        let newTheme = config.sidebarTheme
+        sidebarHostingView.rootView = SidebarView(
+            tabManager: sidebarTabManager,
+            updateViewModel: (NSApp.delegate as! AppDelegate).updateViewModel,
+            theme: newTheme,
+            fields: config.sidebarFields
+        )
+        sidebarEffectView?.alphaValue = config.sidebarOpacity
+    }
+
+    /// Refreshes the sidebar tab manager for all windows in the current tab group.
+    private func refreshAllSidebars() {
+        let windows = window?.tabGroup?.windows ?? (window.map { [$0] } ?? [])
+        for w in windows {
+            if let controller = w.windowController as? TerminalController {
+                controller.sidebarTabManager?.refresh()
             }
         }
     }
@@ -730,9 +772,22 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         cancelPendingInitialPresentation()
 
-        // Undo
-        if let undoManager, let undoState {
-            // Register undo action to restore the tab
+        // Closing the visible tab hands selection to whichever window AppKit
+        // happens to raise, which is the most recently fronted one and has
+        // nothing to do with where the tab sat in the sidebar. Take the row
+        // directly above instead, so selection walks the list the way it
+        // reads. Decided before the close, while the sidebar still exists.
+        let replacement: NSWindow? = tabGroup.selectedWindow === window
+            ? sidebarTabManager?.tabAdjacentInDisplayOrder(to: window)
+            : nil
+
+        // With pane-keeper, undo must not retain live SurfaceViews: that keeps
+        // the keeper alive (kill runs from surface free) and leaves Metal
+        // layers in WindowServer after AppKit has already forgotten the tab.
+        // Without pane-keeper, keep the existing undo-restore behavior.
+        if ghostty.config.paneKeeper {
+            releaseSurfacesImmediately()
+        } else if let undoManager, let undoState {
             undoManager.setActionName("Close Tab")
             undoManager.registerUndo(
                 withTarget: ghostty,
@@ -749,9 +804,25 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     }
                 }
             }
+            // Drop this controller's refs; undo holds the only remaining tree
+            // for undo-timeout, matching closeWindowImmediately.
+            surfaceTree = .init()
+            focusedSurface = nil
+        } else {
+            releaseSurfacesImmediately()
         }
 
         window.close()
+
+        // Sibling sidebars hold TabItems for every window in the group. Force
+        // them to drop this window on this runloop turn, not on the next 0.5s
+        // store tick — a strong window ref in those rows is enough to keep the
+        // controller (and previously its surfaces) alive after close.
+        SidebarStore.shared.requestRefresh(reason: "tab closed", force: true)
+
+        if let replacement, tabGroup.windows.contains(replacement) {
+            tabGroup.selectedWindow = replacement
+        }
     }
 
     private func closeOtherTabsImmediately() {
@@ -850,7 +921,22 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         cancelPendingInitialPresentation()
 
-        registerUndoForCloseWindow()
+        // Same rule as closeTabImmediately: pane-keeper + live-surface undo
+        // leaks keepers and WindowServer layers. Skip that undo and free now.
+        if ghostty.config.paneKeeper {
+            if let tabGroup = window.tabGroup, tabGroup.windows.count > 1 {
+                for tabWindow in tabGroup.windows {
+                    if let controller = tabWindow.windowController as? TerminalController {
+                        controller.cancelPendingInitialPresentation()
+                        controller.releaseSurfacesImmediately()
+                    }
+                }
+            } else {
+                releaseSurfacesImmediately()
+            }
+        } else {
+            registerUndoForCloseWindow()
+        }
 
         if let tabGroup = window.tabGroup, tabGroup.windows.count > 1 {
             tabGroup.windows.forEach { window in
@@ -859,7 +945,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 // process them on later ticks so we can't just disable undo registration.
                 if let controller = window.windowController as? TerminalController {
                     controller.cancelPendingInitialPresentation()
-                    controller.surfaceTree = .init()
+                    if !ghostty.config.paneKeeper {
+                        controller.surfaceTree = .init()
+                    }
                 }
 
                 window.close()
@@ -867,6 +955,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         } else {
             window.close()
         }
+
+        SidebarStore.shared.requestRefresh(reason: "window closed", force: true)
     }
 
     /// Registers undo for closing window(s), handling both single windows and tab groups.
@@ -1112,8 +1202,21 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             focusedSurface = view
         }
 
-        // Initialize our content view to the SwiftUI root
-        let container = TerminalViewContainer {
+        // Mark the window as using a sidebar so the native tab bar is hidden
+        // and the sidebar extends to the top of the window.
+        if let terminalWindow = window as? TerminalWindow {
+            terminalWindow.sidebarActive = true
+        }
+
+        // Initialize sidebar tab manager
+        let tabManager = SidebarTabManager(
+            window: window,
+            bellTriggersAttention: ghostty.config.bellFeatures.contains(.attention)
+        )
+        self.sidebarTabManager = tabManager
+
+        // Create the terminal content view
+        let terminalContainer = TerminalViewContainer {
             TerminalView(ghostty: ghostty, viewModel: self, delegate: self)
         }
 
@@ -1121,9 +1224,71 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // intrinsicContentSize returns the correct value immediately,
         // without waiting for @FocusedValue to propagate through the
         // SwiftUI focus chain.
-        container.initialContentSize = focusedSurface?.initialSize
+        terminalContainer.initialContentSize = focusedSurface?.initialSize
 
-        window.contentView = container
+        // Create the sidebar hosting view. NonDraggableHostingView is required:
+        // the NSVisualEffectView wrapper makes the whole area window-draggable
+        // by default, so any click SwiftUI doesn't claim (or claims late, e.g.
+        // tap gestures on tab rows) would start dragging the window instead.
+        let sidebarHostingView = NonDraggableHostingView(rootView: SidebarView(
+            tabManager: tabManager,
+            updateViewModel: (NSApp.delegate as! AppDelegate).updateViewModel,
+            theme: ghostty.config.sidebarTheme,
+            fields: ghostty.config.sidebarFields
+        ))
+        self.sidebarHostingView = sidebarHostingView
+
+        // Wrap the sidebar in a frosted glass effect view (NSVisualEffectView
+        // with .sidebar material). The SwiftUI view has a clear background so
+        // the vibrancy shows through.
+        //
+        // The effect view and the hosting view are SIBLINGS inside a plain
+        // container (not parent/child) so that `sidebar-opacity` can fade the
+        // background material alone — fading a parent effect view would fade
+        // the tab list content with it.
+        let sidebarContainer = NSView()
+        let sidebarEffectView = NSVisualEffectView()
+        sidebarEffectView.material = .sidebar
+        sidebarEffectView.blendingMode = .behindWindow
+        sidebarEffectView.state = .followsWindowActiveState
+        sidebarEffectView.alphaValue = ghostty.config.sidebarOpacity
+        self.sidebarEffectView = sidebarEffectView
+
+        sidebarEffectView.translatesAutoresizingMaskIntoConstraints = false
+        sidebarHostingView.translatesAutoresizingMaskIntoConstraints = false
+        sidebarContainer.addSubview(sidebarEffectView)
+        sidebarContainer.addSubview(sidebarHostingView)
+        NSLayoutConstraint.activate([
+            sidebarEffectView.topAnchor.constraint(equalTo: sidebarContainer.topAnchor),
+            sidebarEffectView.bottomAnchor.constraint(equalTo: sidebarContainer.bottomAnchor),
+            sidebarEffectView.leadingAnchor.constraint(equalTo: sidebarContainer.leadingAnchor),
+            sidebarEffectView.trailingAnchor.constraint(equalTo: sidebarContainer.trailingAnchor),
+            sidebarHostingView.topAnchor.constraint(equalTo: sidebarContainer.topAnchor),
+            sidebarHostingView.bottomAnchor.constraint(equalTo: sidebarContainer.bottomAnchor),
+            sidebarHostingView.leadingAnchor.constraint(equalTo: sidebarContainer.leadingAnchor),
+            sidebarHostingView.trailingAnchor.constraint(equalTo: sidebarContainer.trailingAnchor),
+        ])
+
+        // Build the split view: sidebar | terminal.
+        // Uses a borderless split view so there's no visible divider line —
+        // the material contrast between the sidebar and terminal is sufficient.
+        let splitView = BorderlessSplitView()
+        splitView.isVertical = true
+        splitView.dividerStyle = .thin
+        splitView.addSubview(sidebarContainer)
+        splitView.addSubview(terminalContainer)
+        splitView.setHoldingPriority(.defaultLow, forSubviewAt: 0)
+        splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 1)
+        splitView.delegate = self
+
+        // Set initial sidebar width (synced across tabs via UserDefaults)
+        let savedWidth = UserDefaults.standard.double(forKey: "SidebarWidth")
+        let sidebarWidth = savedWidth > 0 ? min(max(savedWidth, 140), 280) : 200
+        sidebarContainer.frame = NSRect(x: 0, y: 0, width: sidebarWidth, height: 400)
+        terminalContainer.frame = NSRect(x: sidebarWidth, y: 0, width: 600, height: 400)
+
+        window.contentView = splitView
+        (window as? TerminalWindow)?.setSidebarTitlebarWidth(sidebarWidth)
 
         // If we have a default size, we want to apply it.
         if let defaultSize {
@@ -1176,25 +1341,34 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     override func showWindow(_ sender: Any?) {
         guard let terminalWindow = window as? TerminalWindow else { return }
 
-        // Set the initial window position. This must happen after the window
-        // is fully set up (content view, toolbar, default size) so that
-        // decorations added by subclass awakeFromNib (e.g. toolbar for tabs
-        // style) don't change the frame after the position is restored.
-        let originChanged = terminalWindow.setInitialWindowPosition(
-            x: derivedConfig.windowPositionX,
-            y: derivedConfig.windowPositionY,
-        )
-        let restored = LastWindowPosition.shared.restore(
-            terminalWindow,
-            origin: !originChanged,
-            size: defaultSize == nil,
-        )
+        // A macOS tab is a separate window merged into a tab group that shares
+        // a single visible frame. If this window has already been added to a
+        // tab group alongside other windows, then setting its frame here would
+        // move the ENTIRE tab group, causing the visible window to "teleport"
+        // when a new tab is opened. Only apply position/size restoration to
+        // standalone windows, mirroring the cascade guard used in `newTab`.
+        let isSecondaryTab = (terminalWindow.tabGroup?.windows.count ?? 1) > 1
+        if !isSecondaryTab {
+            // Set the initial window position. This must happen after the window
+            // is fully set up (content view, toolbar, default size) so that
+            // decorations added by subclass awakeFromNib (e.g. toolbar for tabs
+            // style) don't change the frame after the position is restored.
+            let originChanged = terminalWindow.setInitialWindowPosition(
+                x: derivedConfig.windowPositionX,
+                y: derivedConfig.windowPositionY,
+            )
+            let restored = LastWindowPosition.shared.restore(
+                terminalWindow,
+                origin: !originChanged,
+                size: defaultSize == nil,
+            )
 
-        // If nothing is changed for the frame,
-        // we should center the window
-        if !originChanged, !restored {
-            // This doesn't work in `windowDidLoad` somehow
-            terminalWindow.center()
+            // If nothing is changed for the frame,
+            // we should center the window
+            if !originChanged, !restored {
+                // This doesn't work in `windowDidLoad` somehow
+                terminalWindow.center()
+            }
         }
 
         super.showWindow(sender)
@@ -1207,6 +1381,33 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Trigger the ghostty core event logic for a new tab.
         guard let surface = self.focusedSurface?.surface else { return }
         ghostty.newTab(surface: surface)
+    }
+
+    // MARK: NSSplitViewDelegate
+
+    func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+        if dividerIndex == 0 { return 140 }
+        return proposedMinimumPosition
+    }
+
+    func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+        if dividerIndex == 0 { return 280 }
+        return proposedMaximumPosition
+    }
+
+    func splitView(_ splitView: NSSplitView, shouldAdjustSizeOfSubview view: NSView) -> Bool {
+        // Keep the sidebar (first subview) fixed; only resize the terminal
+        return view != splitView.subviews.first
+    }
+
+    func splitViewDidResizeSubviews(_ notification: Notification) {
+        guard let splitView = notification.object as? NSSplitView,
+              let sidebar = splitView.subviews.first else { return }
+        let width = sidebar.frame.width
+        if width > 0 {
+            UserDefaults.standard.set(width, forKey: "SidebarWidth")
+            (window as? TerminalWindow)?.setSidebarTitlebarWidth(width)
+        }
     }
 
     // MARK: NSWindowDelegate
@@ -1230,9 +1431,22 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     override func windowWillClose(_ notification: Notification) {
+        // Sidebar tab items used to strongly reference their NSWindows. Tear
+        // the manager down before the window closes so a closed tab cannot
+        // retain its controller through that window list. Surfaces should
+        // already have been released on the deliberate close path; this is
+        // the safety net for any other close route.
+        sidebarTabManager?.invalidate()
+        sidebarTabManager = nil
+        sidebarHostingView = nil
+        if !surfaceTree.isEmpty {
+            releaseSurfacesImmediately()
+        }
+
         super.windowWillClose(notification)
         cancelPendingInitialPresentation()
         self.relabelTabs()
+        SidebarStore.shared.requestRefresh(reason: "windowWillClose", force: true)
 
         // If we remove a window, we reset the cascade point to the key window so that
         // the next window cascade's from that one.
@@ -1266,8 +1480,21 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     override func windowDidBecomeKey(_ notification: Notification) {
         super.windowDidBecomeKey(notification)
-        self.relabelTabs()
+        self.relabelTabs(refreshSidebars: false)
         self.fixTabBar()
+        self.syncSidebarWidth()
+    }
+
+    private func syncSidebarWidth() {
+        guard let splitView = window?.contentView as? NSSplitView,
+              let sidebar = splitView.subviews.first else { return }
+        let savedWidth = UserDefaults.standard.double(forKey: "SidebarWidth")
+        guard savedWidth > 0 else { return }
+        let targetWidth = min(max(savedWidth, 140), 280)
+        if abs(sidebar.frame.width - targetWidth) > 1 {
+            splitView.setPosition(targetWidth, ofDividerAt: 0)
+        }
+        (window as? TerminalWindow)?.setSidebarTitlebarWidth(targetWidth)
     }
 
     override func windowDidMove(_ notification: Notification) {
@@ -1438,6 +1665,30 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     @IBAction override func closeWindow(_ sender: Any?) {
         guard let window = window else { return }
+
+        // If this tab group is the last terminal window, closing it would
+        // permanently lose the tabs: macOS state restoration only saves
+        // windows that are still open when the app quits, so a closed
+        // window never comes back on relaunch. Convert the close into an
+        // app termination instead — the windows are still open while state
+        // is saved, so the next launch restores every tab (same path as
+        // quit/relaunch). This covers the red close button, the Close
+        // Window menu item, and the close_window keybind, all of which
+        // funnel through here. Quit confirmation for running processes
+        // still applies via applicationShouldTerminate.
+        //
+        // Undoing a "New Window" also routes through closeWindow — never
+        // convert that into a termination.
+        let isUndoRedo = (undoManager?.isUndoing ?? false) || (undoManager?.isRedoing ?? false)
+        let groupWindows = window.tabGroup?.windows ?? [window]
+        let hasOtherTerminalWindows = Self.all.contains { controller in
+            guard let w = controller.window else { return false }
+            return !groupWindows.contains(w)
+        }
+        if !hasOtherTerminalWindows && !isUndoRedo {
+            NSApp.terminate(nil)
+            return
+        }
 
         // We need to check all the windows in our tab group for confirmation
         // if we're closing the window. If we don't have a tabgroup for any
@@ -1829,4 +2080,15 @@ extension TerminalController {
             return nil
         }
     }
+}
+
+// MARK: - BorderlessSplitView
+
+/// An NSSplitView subclass that draws no visible divider line.
+/// The sidebar's frosted glass material provides enough visual separation
+/// from the terminal pane, so no explicit divider is needed.
+/// The divider is still draggable for resizing — it's just invisible.
+private class BorderlessSplitView: NSSplitView {
+    override var dividerColor: NSColor { .clear }
+    override var dividerThickness: CGFloat { 1 }
 }

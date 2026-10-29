@@ -1,4 +1,5 @@
 import Cocoa
+import GhosttyKit
 
 protocol TerminalRestorable: Codable {
     static var selfKey: String { get }
@@ -187,6 +188,15 @@ class TerminalWindowRestoration: NSObject, NSWindowRestoration {
         }
 
         completionHandler(window, nil)
+
+        // Auto-resume agent sessions for all surfaces in this window.
+        // A surface can only have one active session type — session keys are
+        // mutually exclusive in TabMetadataStore, so only one will be present.
+        for surface in c.surfaceTree {
+            attemptSessionResume(for: surface)
+            attemptLastCommandRestore(for: surface)
+        }
+
         guard let mode = state.effectiveFullscreenMode, mode != .native else {
             // We let AppKit handle native fullscreen
             return
@@ -194,6 +204,86 @@ class TerminalWindowRestoration: NSObject, NSWindowRestoration {
         // Give the window to AppKit first, then adjust its frame and style
         // to minimise any visible frame changes.
         c.toggleFullscreen(mode: mode)
+    }
+
+    /// Attempt to auto-resume an agent session in a restored surface.
+    /// A surface can only resume ONE session type. Session keys are mutually
+    /// exclusive in TabMetadataStore, so we detect which agent was running
+    /// and build the appropriate resume command.
+    @MainActor
+    private static func attemptSessionResume(for surface: Ghostty.SurfaceView) {
+        // A reattached pane's agent never stopped. Typing a resume command
+        // into a running agent doesn't resume anything — it feeds text to a
+        // live session and corrupts it.
+        if wasReattached(surface) { return }
+
+        let surfaceId = surface.id
+        let store = TabMetadataStore.shared
+        let entries = store.entries[surfaceId] ?? [:]
+
+        // Detect which agent was running from its session key.
+        // Session keys are mutually exclusive, so at most one will be present.
+        var detected: (agent: SidebarTabManager.AgentType, sessionId: String)?
+        for agent in SidebarTabManager.AgentType.allCases {
+            if let entry = entries[agent.sessionKey], !entry.value.isEmpty {
+                detected = (agent, entry.value)
+                break
+            }
+        }
+        guard let (agent, sessionId) = detected else { return }
+
+        // Build the resume command for the detected agent (runs with full
+        // permissions). Returns nil if the agent can't resume or the stored
+        // session id fails the injection-safety check.
+        guard let command = agent.resumeCommand(sessionId: sessionId) else { return }
+
+        // Don't clear session keys here. They persist so that if the app is
+        // force-killed before the resume completes, the next restart will
+        // try again. The hooks will update them when the session actually starts.
+
+        // Delay to let the shell initialize and display its prompt.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            // Type the command but don't execute — let the user press Enter when ready.
+            surface.sendText(command)
+        }
+    }
+
+    /// Pre-type the last executed command into a restored surface's prompt,
+    /// so the user can press Enter to re-run it. Only fires when there's no
+    /// agent session to resume (those are handled by attemptSessionResume).
+    /// Whether this pane came back to a shell that never stopped, in which
+    /// case nothing may be typed into it: whatever the user left running is
+    /// still there, and its prompt is not ours to fill.
+    @MainActor
+    private static func wasReattached(_ surface: Ghostty.SurfaceView) -> Bool {
+        surface.id.uuidString.withCString { ghostty_pane_was_reattached($0) }
+    }
+
+    @MainActor
+    private static func attemptLastCommandRestore(for surface: Ghostty.SurfaceView) {
+        // Same reasoning as the agent path: a resumed shell already has
+        // whatever the user left at its prompt.
+        if wasReattached(surface) { return }
+
+        let surfaceId = surface.id
+        let store = TabMetadataStore.shared
+        let entries = store.entries[surfaceId] ?? [:]
+
+        // If this surface has any agent session, skip — that's handled by
+        // attemptSessionResume.
+        let hasAgentSession = SidebarTabManager.AgentType.allCases.contains { agent in
+            entries[agent.sessionKey] != nil
+        }
+        if hasAgentSession { return }
+
+        guard let cmd = entries["last-command"]?.value,
+              !cmd.isEmpty else { return }
+
+        // Delay to let the shell initialize and display its prompt.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            // Type the command but don't execute — let the user press Enter when ready.
+            surface.sendText(cmd)
+        }
     }
 
     /// This restores the focus state of the surfaceview within the given window. When restoring,

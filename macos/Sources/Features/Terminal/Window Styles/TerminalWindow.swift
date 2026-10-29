@@ -45,18 +45,48 @@ class TerminalWindow: NSWindow {
     )
 
     /// Whether this window supports the update accessory. If this is false, then views within this
-    /// window should determine how to show update notifications.
+    /// window should determine how to show update notifications via the content overlay instead.
     var supportsUpdateAccessory: Bool {
-        // Native window supports it.
-        true
+        // Disabled: SwiftUI popovers in titlebar accessories are unreliable
+        // when the window has a sidebar, causing unresponsive buttons.
+        // The content overlay (UpdateOverlay in TerminalView) works correctly.
+        false
     }
 
     /// Glass effect view for liquid glass background when transparency is enabled
     private var glassEffectView: NSView?
 
+    /// Sidebar background that visually extends the source list into the titlebar.
+    private weak var sidebarTitlebarBackdropView: NSVisualEffectView?
+    private var sidebarTitlebarWidthConstraint: NSLayoutConstraint?
+    private var sidebarTitlebarWidth: CGFloat = 0
+    /// Custom title label placed in the titlebar, left-aligned to the terminal section.
+    private weak var sidebarTitleLabel: NSTextField?
+    private var sidebarTitleLabelLeadingConstraint: NSLayoutConstraint?
+
     /// Gets the terminal controller from the window controller.
     var terminalController: TerminalController? {
         windowController as? TerminalController
+    }
+
+    /// When true, the native tab bar is hidden because a sidebar is providing tab UI.
+    /// In this mode we also paint the titlebar area above the sidebar so the source
+    /// list appears to extend behind the traffic lights like Finder.
+    var sidebarActive: Bool = false {
+        didSet {
+            guard sidebarActive != oldValue else { return }
+            applySidebarStyle()
+        }
+    }
+
+    /// Apply the sidebar-aware window style.
+    private func applySidebarStyle() {
+        titleVisibility = .hidden
+        if sidebarActive {
+            updateSidebarTitlebarBackdrop()
+        } else {
+            removeSidebarTitlebarBackdrop()
+        }
     }
 
     /// The color assigned to this window's tab. Setting this updates the tab color indicator
@@ -220,11 +250,23 @@ class TerminalWindow: NSWindow {
             tabBarDidDisappear()
         }
         viewModel.isMainWindow = true
+
+        if sidebarActive {
+            updateSidebarTitlebarBackdrop()
+        }
     }
 
     override func resignMain() {
         super.resignMain()
         viewModel.isMainWindow = false
+    }
+
+    override func update() {
+        super.update()
+
+        if sidebarActive {
+            updateSidebarTitlebarBackdrop()
+        }
     }
 
     @discardableResult
@@ -260,6 +302,14 @@ class TerminalWindow: NSWindow {
         // it. This has been verified to work on macOS 12 to 26
         if isTabBar(childViewController) {
             childViewController.identifier = Self.tabBarIdentifier
+
+            // When sidebar is active, hide the native tab bar immediately
+            if sidebarActive {
+                childViewController.isHidden = true
+                // Set height to 0 to prevent layout space
+                childViewController.fullScreenMinHeight = 0
+            }
+
             tabBarDidAppear()
         }
     }
@@ -392,6 +442,9 @@ class TerminalWindow: NSWindow {
             // tab title if we're using custom fonts.
             tab.attributedTitle = attributedTitle
             guard title != oldValue else { return }
+
+            // Sync our custom titlebar label (fork: sidebar titlebar).
+            sidebarTitleLabel?.stringValue = title
 
             syncWindowTitleAppearance()
         }
@@ -594,6 +647,109 @@ class TerminalWindow: NSWindow {
         terminalController?.updateColorSchemeForSurfaceTree()
     }
 
+    func setSidebarTitlebarWidth(_ width: CGFloat) {
+        let clampedWidth = max(0, width)
+        sidebarTitlebarWidth = clampedWidth
+
+        if sidebarActive {
+            updateSidebarTitlebarBackdrop()
+        }
+    }
+
+    private func updateSidebarTitlebarBackdrop() {
+        guard sidebarActive, sidebarTitlebarWidth > 0 else {
+            removeSidebarTitlebarBackdrop()
+            return
+        }
+
+        // Bail out early when there is nothing to do. This runs from `update()`,
+        // which AppKit calls on every pass of the event loop — during any
+        // animation that's once per displayed frame — and everything below
+        // walks the whole view tree hunting for private AppKit views by class
+        // name. Reaching the titlebar through the backdrop already installed
+        // in it answers the same question for free.
+        //
+        // Fullscreen is excluded: the titlebar lives in a separate window
+        // there and can be rebuilt underneath us, so it takes the long path.
+        if !styleMask.contains(.fullScreen),
+           let backdrop = sidebarTitlebarBackdropView,
+           let installedIn = backdrop.superview,
+           sidebarTitleLabel?.superview === installedIn,
+           sidebarTitlebarWidthConstraint?.constant == sidebarTitlebarWidth,
+           sidebarTitleLabelLeadingConstraint?.constant == sidebarTitlebarWidth + 12,
+           sidebarTitleLabel?.stringValue == title {
+            return
+        }
+
+        guard let titlebarView = titlebarContainer?.firstDescendant(withClassName: "NSTitlebarView") else {
+            return
+        }
+
+        let backdropView: NSVisualEffectView
+        if let existingBackdrop = sidebarTitlebarBackdropView, existingBackdrop.superview === titlebarView {
+            backdropView = existingBackdrop
+        } else {
+            let newBackdrop = PassthroughSidebarTitlebarView()
+            newBackdrop.translatesAutoresizingMaskIntoConstraints = false
+
+            if let backgroundView = titlebarContainer?.firstDescendant(withClassName: "NSTitlebarBackgroundView") {
+                titlebarView.addSubview(newBackdrop, positioned: .above, relativeTo: backgroundView)
+            } else {
+                titlebarView.addSubview(newBackdrop)
+            }
+
+            let widthConstraint = newBackdrop.widthAnchor.constraint(equalToConstant: sidebarTitlebarWidth)
+            sidebarTitlebarWidthConstraint = widthConstraint
+
+            NSLayoutConstraint.activate([
+                newBackdrop.leadingAnchor.constraint(equalTo: titlebarView.leadingAnchor),
+                newBackdrop.topAnchor.constraint(equalTo: titlebarView.topAnchor),
+                newBackdrop.bottomAnchor.constraint(equalTo: titlebarView.bottomAnchor),
+                widthConstraint,
+            ])
+
+            sidebarTitlebarBackdropView = newBackdrop
+            backdropView = newBackdrop
+        }
+
+        sidebarTitlebarWidthConstraint?.constant = sidebarTitlebarWidth
+        backdropView.material = .sidebar
+        backdropView.blendingMode = .behindWindow
+        backdropView.state = .followsWindowActiveState
+
+        // Add or update the title label in the titlebar, left-aligned to terminal section
+        if sidebarTitleLabel == nil || sidebarTitleLabel?.superview !== titlebarView {
+            sidebarTitleLabel?.removeFromSuperview()
+            let label = NSTextField(labelWithString: title)
+            label.font = .systemFont(ofSize: 13, weight: .regular)
+            label.textColor = .secondaryLabelColor
+            label.lineBreakMode = .byTruncatingTail
+            label.translatesAutoresizingMaskIntoConstraints = false
+            // hitTest nil so clicks pass through to the titlebar for dragging
+            titlebarView.addSubview(label)
+            let leading = label.leadingAnchor.constraint(equalTo: titlebarView.leadingAnchor, constant: sidebarTitlebarWidth + 12)
+            sidebarTitleLabelLeadingConstraint = leading
+            NSLayoutConstraint.activate([
+                leading,
+                label.centerYAnchor.constraint(equalTo: titlebarView.centerYAnchor),
+                label.trailingAnchor.constraint(lessThanOrEqualTo: titlebarView.trailingAnchor, constant: -12),
+            ])
+            sidebarTitleLabel = label
+        }
+        sidebarTitleLabelLeadingConstraint?.constant = sidebarTitlebarWidth + 12
+        sidebarTitleLabel?.stringValue = title
+
+    }
+
+    private func removeSidebarTitlebarBackdrop() {
+        sidebarTitleLabel?.removeFromSuperview()
+        sidebarTitleLabel = nil
+        sidebarTitleLabelLeadingConstraint = nil
+        sidebarTitlebarBackdropView?.removeFromSuperview()
+        sidebarTitlebarBackdropView = nil
+        sidebarTitlebarWidthConstraint = nil
+    }
+
     func setInitialWindowPosition(x: Int16?, y: Int16?) -> Bool {
         // If we don't have an X/Y then we try to use the previously saved window pos.
         guard let x = x, let y = y else {
@@ -673,6 +829,26 @@ class TerminalWindow: NSWindow {
             }
         }
     }
+}
+
+private final class PassthroughSidebarTitlebarView: NSVisualEffectView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupView()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupView()
+    }
+
+    private func setupView() {
+        material = .sidebar
+        blendingMode = .behindWindow
+        state = .followsWindowActiveState
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 // MARK: SwiftUI View

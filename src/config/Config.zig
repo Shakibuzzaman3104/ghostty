@@ -1082,6 +1082,21 @@ palette: Palette = .{},
 /// Available since: 1.1.0
 @"split-divider-color": ?Color = null,
 
+/// Comma-separated list of fields to display in the sidebar tab cards.
+/// Available fields: `title`, `directory`, `status`.
+/// - `title`: the tab title (process name or custom rename)
+/// - `directory`: the working directory (last path component)
+/// - `status`: status entries set via `ghosttyctl set-status` (e.g. git branch)
+///
+/// Default: `title,directory,status`
+@"sidebar-fields": ?[:0]const u8 = null,
+
+/// Opacity of the sidebar background, from 0 to 1. At 1 (the default) the
+/// sidebar uses the standard translucent "frosted glass" sidebar material.
+/// Values below 1 blend the material toward fully transparent, letting more
+/// of whatever is behind the window show through.
+@"sidebar-opacity": f64 = 1.0,
+
 /// Control when Ghostty preserves a zoomed split. Under normal circumstances,
 /// any operation that changes focus or layout of the split tree in a window
 /// will unzoom any zoomed split. This configuration allows you to control
@@ -2310,7 +2325,7 @@ keybind: Keybinds = .{},
 ///     or at the end if there are no focused tabs.
 ///
 ///   * `end` - Insert the new tab at the end of the tab list.
-@"window-new-tab-position": WindowNewTabPosition = .current,
+@"window-new-tab-position": WindowNewTabPosition = .end,
 
 /// Whether to show the tab bar.
 ///
@@ -2624,6 +2639,22 @@ keybind: Keybinds = .{},
 /// confirm closing a surface, even if shell integration says a process isn't
 /// running.
 @"confirm-close-surface": ConfirmCloseSurface = .true,
+
+/// Run each pane's shell under a small keeper process instead of starting it
+/// directly, so that it can outlive Ghostty.
+///
+/// This is the foundation for picking panes back up after a restart: the
+/// keeper owns the terminal and the shell, so quitting Ghostty — or crashing,
+/// or installing an update — no longer ends them.
+///
+/// Closing a pane still kills its shell, exactly as it does without this. The
+/// only difference is who does the killing: the keeper, which as the shell's
+/// parent is the only process that can confirm it actually died.
+///
+/// Costs one small resident process per open pane.
+///
+/// Experimental, and off by default.
+@"pane-keeper": bool = false,
 
 /// Whether or not to quit after the last surface is closed.
 ///

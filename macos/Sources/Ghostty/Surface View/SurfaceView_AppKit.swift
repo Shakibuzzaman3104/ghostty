@@ -184,6 +184,23 @@ extension Ghostty {
         override var surface: ghostty_surface_t? {
             surfaceModel?.unsafeCValue
         }
+
+        /// Send text to the terminal as if typed. Used for auto-resume after restoration.
+        func sendText(_ text: String) {
+            surfaceModel?.sendText(text)
+        }
+
+        /// Free the underlying libghostty surface immediately.
+        ///
+        /// Tab close must not wait on ARC of the SwiftUI/AppKit view tree:
+        /// retaining a live surface keeps its Metal `IOSurfaceLayer` in
+        /// WindowServer and, with `pane-keeper`, blocks the keeper kill that
+        /// only runs from surface teardown. Call this on the deliberate close
+        /// path before the window goes away.
+        func releaseTerminal() {
+            surfaceModel = nil
+        }
+
         /// Current scrollbar state, cached here for persistence across rebuilds
         /// of the SwiftUI view hierarchy, for example when changing splits
         var scrollbar: Ghostty.Action.Scrollbar?
@@ -204,6 +221,9 @@ extension Ghostty {
         // True when we've consumed a left mouse-down only to move focus and
         // should suppress the matching mouse-up from being reported.
         private var suppressNextLeftMouseUp: Bool = false
+
+        // Keep the complete selection gesture on the pane resolved at mouse-down.
+        private var capturesLeftMouseEvents = false
 
         // A small delay that is introduced before a title change to avoid flickers
         private var titleChangeTimer: Timer?
@@ -380,6 +400,8 @@ extension Ghostty {
                     // event and encode the event to the pty which we want to avoid.
                     // (Issue 2595)
                     .leftMouseDown,
+                    .leftMouseDragged,
+                    .leftMouseUp,
                 ]
             ) { [weak self] event in self?.localEventHandler(event) }
 
@@ -393,6 +415,13 @@ extension Ghostty {
                 return
             }
             self.surfaceModel = Ghostty.Surface(cSurface: surface)
+
+            // Seed pwd with the configured working directory so the sidebar
+            // can group the tab immediately, before the shell sends OSC 7.
+            // The pty's OSC 7 will overwrite this once the shell starts.
+            if let wd = surface_cfg.workingDirectory, !wd.isEmpty {
+                self.pwd = wd
+            }
 
             // Setup our tracking area so we get mouse moved events
             updateTrackingAreas()
@@ -669,12 +698,16 @@ extension Ghostty {
             case .leftMouseDown:
                 localEventLeftMouseDown(event)
 
+            case .leftMouseDragged, .leftMouseUp:
+                localEventLeftMouseContinuation(event)
+
             default:
                 event
             }
         }
 
         private func localEventLeftMouseDown(_ event: NSEvent) -> NSEvent? {
+            capturesLeftMouseEvents = false
             let isCommandPaletteVisible = (event.window?.windowController as? BaseTerminalController)?
                 .commandPaletteIsShowing == true
             guard !isCommandPaletteVisible else {
@@ -688,32 +721,28 @@ extension Ghostty {
                   event.window != nil,
                   window == event.window else { return event }
 
-            // The clicked location in this window should be this view.
-            guard
-                let location = window.contentView?.convert(event.locationInWindow, from: nil)
-            else {
-                return event
-            }
-            // We should use window to perform hitTest here,
-            // because there could be some other overlays on top, like search bar
-            guard window.contentView?.hitTest(location) == self else { return event }
+            // Check the whole content hierarchy so overlays such as the search
+            // bar keep their clicks instead of transferring terminal focus.
+            guard window.contentViewHitTest(at: event.locationInWindow) === self else { return event }
 
             // We always assume that we're resetting our mouse suppression
             // unless we see the specific scenario below to set it.
             suppressNextLeftMouseUp = false
 
-            // If we're already the first responder then no focus transfer is
-            // happening, so the click should continue as normal.
-            guard window.firstResponder !== self else {
-                return event
-            }
-
-            // If our window/app is already focused, then this click is only
-            // being used to transfer split focus. Consume it so it does not
-            // get forwarded to the terminal as a mouse click.
+            // Resolve focus and selection through the same hit test, keeping
+            // the mouse-down and its matching drag/up on the clicked pane.
             if NSApp.isActive && window.isKeyWindow {
-                window.makeFirstResponder(self)
-                suppressNextLeftMouseUp = true
+                // AppKit opens the context menu before mouseDown for control-clicks.
+                if window.firstResponder === self && event.modifierFlags.contains(.control) {
+                    return event
+                }
+                capturesLeftMouseEvents = true
+                if window.firstResponder !== self {
+                    window.makeFirstResponder(self)
+                    suppressNextLeftMouseUp = true
+                } else {
+                    mouseDown(with: event)
+                }
                 return nil
             }
 
@@ -724,6 +753,17 @@ extension Ghostty {
             // focus the window and dispatch events. If you return nil here then
             // nobody gets a windowDidBecomeKey event and so on.
             return event
+        }
+
+        private func localEventLeftMouseContinuation(_ event: NSEvent) -> NSEvent? {
+            guard capturesLeftMouseEvents, event.window === window else { return event }
+            if event.type == .leftMouseUp {
+                capturesLeftMouseEvents = false
+                mouseUp(with: event)
+            } else if !suppressNextLeftMouseUp {
+                mouseDragged(with: event)
+            }
+            return nil
         }
 
         private func localEventKeyUp(_ event: NSEvent) -> NSEvent? {
@@ -920,6 +960,7 @@ extension Ghostty {
         }
 
         override func mouseDown(with event: NSEvent) {
+            updateMousePosition(with: event)
             guard let surface = self.surface else { return }
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
@@ -932,6 +973,8 @@ extension Ghostty {
                 suppressNextLeftMouseUp = false
                 return
             }
+
+            updateMousePosition(with: event)
 
             // Always reset our pressure when the mouse goes up
             prevPressureStage = 0
@@ -946,6 +989,7 @@ extension Ghostty {
         }
 
         override func otherMouseDown(with event: NSEvent) {
+            updateMousePosition(with: event)
             guard let surface = self.surface else { return }
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             let button = Ghostty.Input.MouseButton(fromNSEventButtonNumber: event.buttonNumber)
@@ -953,6 +997,7 @@ extension Ghostty {
         }
 
         override func otherMouseUp(with event: NSEvent) {
+            updateMousePosition(with: event)
             guard let surface = self.surface else { return }
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             let button = Ghostty.Input.MouseButton(fromNSEventButtonNumber: event.buttonNumber)
@@ -960,6 +1005,7 @@ extension Ghostty {
         }
 
         override func rightMouseDown(with event: NSEvent) {
+            updateMousePosition(with: event)
             guard let surface = self.surface else { return super.rightMouseDown(with: event) }
 
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
@@ -978,6 +1024,7 @@ extension Ghostty {
         }
 
         override func rightMouseUp(with event: NSEvent) {
+            updateMousePosition(with: event)
             guard let surface = self.surface else { return super.rightMouseUp(with: event) }
 
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
@@ -999,21 +1046,11 @@ extension Ghostty {
             mouseOverSurface = true
             super.mouseEntered(with: event)
 
-            let pos = self.convert(event.locationInWindow, from: nil)
-            mouseLocationInSurface = pos
-
-            guard let surfaceModel else { return }
-
             // On mouse enter we need to reset our cursor position. This is
             // super important because we set it to -1/-1 on mouseExit and
             // lots of mouse logic (i.e. whether to send mouse reports) depend
             // on the position being in the viewport if it is.
-            let mouseEvent = Ghostty.Input.MousePosEvent(
-                x: pos.x,
-                y: frame.height - pos.y,
-                mods: .init(nsFlags: event.modifierFlags)
-            )
-            surfaceModel.sendMousePos(mouseEvent)
+            updateMousePosition(with: event)
         }
 
         override func mouseExited(with event: NSEvent) {
@@ -1037,7 +1074,10 @@ extension Ghostty {
             surfaceModel.sendMousePos(mouseEvent)
         }
 
-        override func mouseMoved(with event: NSEvent) {
+        // Button events can arrive without a preceding mouseMoved (including
+        // after a split/layout change). Refresh the core position before every
+        // press/release so selection and mouse reporting use this event's cell.
+        private func updateMousePosition(with event: NSEvent) {
             let pos = self.convert(event.locationInWindow, from: nil)
             mouseLocationInSurface = pos
 
@@ -1050,6 +1090,10 @@ extension Ghostty {
                 mods: .init(nsFlags: event.modifierFlags)
             )
             surfaceModel.sendMousePos(mouseEvent)
+        }
+
+        override func mouseMoved(with event: NSEvent) {
+            updateMousePosition(with: event)
 
             // Handle focus-follows-mouse
             if let window,
@@ -1578,6 +1622,7 @@ extension Ghostty {
         }
 
         override func menu(for event: NSEvent) -> NSMenu? {
+            updateMousePosition(with: event)
             // We only support right-click menus
             switch event.type {
             case .rightMouseDown:
@@ -1908,6 +1953,16 @@ extension Ghostty {
             let uuid = UUID(uuidString: try container.decode(String.self, forKey: .uuid))
             var config = Ghostty.SurfaceConfiguration()
             config.workingDirectory = try container.decode(String?.self, forKey: .pwd)
+
+            // Inject IPC env vars so sidebar hooks work in restored terminals.
+            config.environmentVariables["GHOSTTY_SOCKET"] = GhosttyIPCServer.shared.socketPath
+            if let uuid = uuid {
+                config.environmentVariables["GHOSTTY_TAB_ID"] = uuid.uuidString
+            }
+            if let shimDir = AgentShimInstaller.shimDirectory {
+                config.environmentVariables["GHOSTTY_AGENT_SHIM_DIR"] = shimDir
+            }
+
             let savedTitle = try container.decodeIfPresent(String.self, forKey: .title)
             let isUserSetTitle = try container.decodeIfPresent(Bool.self, forKey: .isUserSetTitle) ?? false
 

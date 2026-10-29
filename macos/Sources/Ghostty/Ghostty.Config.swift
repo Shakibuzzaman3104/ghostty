@@ -535,6 +535,63 @@ extension Ghostty {
             )
         }
 
+        /// The terminal background as an NSColor, for use by the sidebar theme.
+        var backgroundNSColor: NSColor {
+            guard let config = self.config else { return .windowBackgroundColor }
+            var color: ghostty_config_color_s = .init()
+            let key = "background"
+            if !ghostty_config_get(config, &color, key, UInt(key.lengthOfBytes(using: .utf8))) {
+                return .windowBackgroundColor
+            }
+            return NSColor(ghostty: color)
+        }
+
+        /// The terminal foreground as an NSColor, for use by the sidebar theme.
+        var foregroundNSColor: NSColor {
+            guard let config = self.config else { return .labelColor }
+            var color: ghostty_config_color_s = .init()
+            let key = "foreground"
+            if !ghostty_config_get(config, &color, key, UInt(key.lengthOfBytes(using: .utf8))) {
+                return .labelColor
+            }
+            return NSColor(ghostty: color)
+        }
+
+        /// Sidebar theme derived from the terminal background/foreground colors.
+        var sidebarTheme: SidebarTheme {
+            return SidebarTheme.from(background: backgroundNSColor, foreground: foregroundNSColor)
+        }
+
+        /// Opacity of the sidebar's frosted-glass background material (0-1).
+        var sidebarOpacity: Double {
+            guard let config = self.config else { return 1 }
+            var v: Double = 1
+            let key = "sidebar-opacity"
+            _ = ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8)))
+            return max(0, min(1, v))
+        }
+
+        /// Which fields to show in sidebar tab cards.
+        var sidebarFields: Set<SidebarField> {
+            guard let config = self.config else { return SidebarField.defaultFields }
+            var v: UnsafePointer<Int8>?
+            let key = "sidebar-fields"
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else {
+                return SidebarField.defaultFields
+            }
+            guard let ptr = v else { return SidebarField.defaultFields }
+            let str = String(cString: ptr)
+            var fields = Set<SidebarField>()
+            for part in str.split(separator: ",") {
+                let trimmed = part.trimmingCharacters(in: .whitespaces)
+                if let field = SidebarField(rawValue: trimmed) {
+                    fields.insert(field)
+                }
+            }
+            return fields.isEmpty ? SidebarField.defaultFields : fields
+        }
+
+        #if canImport(AppKit)
         var quickTerminalPosition: QuickTerminalPosition {
             guard let config = self.config else { return .top }
             var v: UnsafePointer<Int8>?
@@ -559,6 +616,15 @@ extension Ghostty {
             guard let config = self.config else { return 0.2 }
             var v: Double = 0.2
             let key = "quick-terminal-animation-duration"
+            _ = ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8)))
+            return v
+        }
+
+        /// Whether panes run under a keeper so they survive a restart.
+        var paneKeeper: Bool {
+            guard let config = self.config else { return false }
+            var v = false
+            let key = "pane-keeper"
             _ = ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8)))
             return v
         }
@@ -588,6 +654,7 @@ extension Ghostty {
             guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return QuickTerminalSize() }
             return QuickTerminalSize(from: v)
         }
+        #endif
 
         var resizeOverlay: ResizeOverlay {
             guard let config = self.config else { return .after_first }

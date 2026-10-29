@@ -45,6 +45,15 @@ class BaseTerminalController: NSWindowController,
         didSet { syncFocusToSurfaceTree() }
     }
 
+    /// The surface that represents this tab's identity: the original surface
+    /// the tab was created with. Unlike `focusedSurface`, this does not change
+    /// when the user clicks between splits, so tab-level consumers (sidebar
+    /// row title/pwd/project grouping, persisted tab order) stay anchored to
+    /// one terminal instead of flipping with split focus. If the primary
+    /// surface leaves the tree (closed or dragged out), the leftmost leaf
+    /// takes over.
+    private(set) var primarySurface: Ghostty.SurfaceView?
+
     /// The tree of splits within this terminal window.
     @Published var surfaceTree: SplitTree<Ghostty.SurfaceView> = .init() {
         didSet {
@@ -148,9 +157,17 @@ class BaseTerminalController: NSWindowController,
 
         super.init(window: nil)
 
-        // Initialize our initial surface.
+        // Initialize our initial surface, injecting IPC environment variables.
         guard let ghostty_app = ghostty.app else { preconditionFailure("app must be loaded") }
-        self.surfaceTree = tree ?? .init(view: Ghostty.SurfaceView(ghostty_app, baseConfig: base))
+        var config = base ?? Ghostty.SurfaceConfiguration()
+        config.environmentVariables["GHOSTTY_SOCKET"] = GhosttyIPCServer.shared.socketPath
+        let surfaceUUID = UUID()
+        config.environmentVariables["GHOSTTY_TAB_ID"] = surfaceUUID.uuidString
+        if let shimDir = AgentShimInstaller.shimDirectory {
+            config.environmentVariables["GHOSTTY_AGENT_SHIM_DIR"] = shimDir
+        }
+        self.surfaceTree = tree ?? .init(view: Ghostty.SurfaceView(ghostty_app, baseConfig: config, uuid: surfaceUUID))
+        self.primarySurface = surfaceTree.root?.leftmostLeaf()
         Self.updateSurfaceControllers(self, from: .init(), to: surfaceTree)
 
         // Setup our bell state for the window
@@ -234,6 +251,20 @@ class BaseTerminalController: NSWindowController,
         undoManager?.removeAllActions(withTarget: self)
         if let eventMonitor {
             NSEvent.removeMonitor(eventMonitor)
+        }
+    }
+
+    /// Tear down every surface in this controller right now.
+    ///
+    /// Clears the split tree and frees each surface's C handle so keeper kill
+    /// and Metal layer release are not gated on later ARC of sidebar rows,
+    /// undo closures, or SwiftUI hosting views.
+    func releaseSurfacesImmediately() {
+        let views = Array(surfaceTree)
+        surfaceTree = .init()
+        focusedSurface = nil
+        for view in views {
+            view.releaseTerminal()
         }
     }
 
@@ -341,6 +372,19 @@ class BaseTerminalController: NSWindowController,
         // If our surface tree becomes empty then we have no focused surface.
         if to.isEmpty {
             focusedSurface = nil
+        }
+
+        // Keep the tab's anchor surface stable: it only changes when the
+        // current primary is no longer in the tree, never on split focus
+        // changes or on a split inserted to its left/above.
+        let oldPrimary = primarySurface
+        if let primary = primarySurface, !to.contains(primary) {
+            primarySurface = to.root?.leftmostLeaf()
+        } else if primarySurface == nil {
+            primarySurface = to.root?.leftmostLeaf()
+        }
+        if primarySurface !== oldPrimary {
+            updateTitleSurfaceSubscription(fallback: focusedSurface)
         }
         syncSurfaceTreeOcclusionState()
     }
@@ -523,6 +567,12 @@ class BaseTerminalController: NSWindowController,
             findNextFocusTargetAfterClosing(node: node)
         } else {
             nil
+        }
+
+        // Clean up metadata store entries for removed surfaces so stale status
+        // indicators (e.g. claude-active) don't linger for reused UUIDs.
+        for surface in node.leaves() {
+            TabMetadataStore.shared.removeAll(for: surface.id)
         }
 
         replaceSurfaceTree(
@@ -878,16 +928,22 @@ class BaseTerminalController: NSWindowController,
         let lastFocusedSurface = focusedSurface
         focusedSurface = to
 
+        // The window title follows the primary (anchor) surface rather than
+        // whichever split is focused, so clicking between splits doesn't
+        // retitle the tab. Re-subscribe only when the anchor itself changes.
+        updateTitleSurfaceSubscription(fallback: lastFocusedSurface)
+    }
+
+    /// Subscribe the window title to the primary surface's title/bell.
+    /// Falls back to `fallback` (typically the last focused surface) when
+    /// there is no primary yet, and to "👻" when the tree is empty.
+    private func updateTitleSurfaceSubscription(fallback: Ghostty.SurfaceView?) {
+        let titleSurface = primarySurface ?? fallback ?? focusedSurface
+
         // Important to cancel any prior subscriptions
         focusedSurfaceCancellables = []
 
-        // Setup our title listener. If we have a focused surface we always use that.
-        // Otherwise, we try to use our last focused surface. In either case, we only
-        // want to care if the surface is in the tree so we don't listen to titles of
-        // closed surfaces.
-        if let titleSurface = focusedSurface ?? lastFocusedSurface,
-           surfaceTree.contains(titleSurface) {
-            // If we have a surface, we want to listen for title changes.
+        if let titleSurface, surfaceTree.contains(titleSurface) {
             titleSurface.$title
                 .combineLatest(titleSurface.$bell)
                 .map { [weak self] in self?.computeTitle(title: $0, bell: $1) ?? "" }
@@ -1251,6 +1307,14 @@ class BaseTerminalController: NSWindowController,
         // may now be resolved. We should verify that no memory leaks and we can remove this.
         window.contentView = nil
 
+        // NOTE: We intentionally do NOT remove tab metadata here.
+        // When the app is relaunching (e.g. Sparkle update), windowWillClose
+        // fires for every window before the app exits. Wiping metadata here
+        // destroys claude-session, codex-session, and tab-created-at
+        // entries that window restoration depends on.
+        // Orphaned entries are cleaned up by TabMetadataStore.pruneOrphanedEntries()
+        // which runs 2 seconds after each app launch.
+
         // Make sure we clean up all our undos
         window.undoManager?.removeAllActions(withTarget: self)
     }
@@ -1330,6 +1394,16 @@ class BaseTerminalController: NSWindowController,
         }
 
         promptTabTitle()
+    }
+
+    @IBAction func setTabColor(_ sender: NSMenuItem) {
+        guard let color = TerminalTabColor(rawValue: sender.tag) else { return }
+        (window as? TerminalWindow)?.tabColor = color
+    }
+
+    @IBAction func toggleTabBorder(_ sender: Any) {
+        let current = UserDefaults.standard.bool(forKey: "SidebarShowCardBorder")
+        UserDefaults.standard.set(!current, forKey: "SidebarShowCardBorder")
     }
 
     @IBAction func splitRight(_ sender: Any) {
@@ -1501,6 +1575,15 @@ extension BaseTerminalController: NSMenuItemValidation {
         switch item.action {
         case #selector(findHide):
             return focusedSurface?.searchState != nil
+
+        case #selector(setTabColor(_:)):
+            let current = (window as? TerminalWindow)?.tabColor ?? .none
+            item.state = (TerminalTabColor(rawValue: item.tag) == current) ? .on : .off
+            return true
+
+        case #selector(toggleTabBorder(_:)):
+            item.state = UserDefaults.standard.bool(forKey: "SidebarShowCardBorder") ? .on : .off
+            return true
 
         default:
             return true

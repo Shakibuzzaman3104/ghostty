@@ -1,0 +1,185 @@
+import Foundation
+import Cocoa
+
+/// Stores per-tab metadata (status entries) that can be set via IPC.
+/// Each tab is identified by its surface UUID.
+///
+/// Entries are persisted to disk as JSON so sidebar metadata survives
+/// app restart. Transient keys (`claude-pid`, `claude-active`) are
+/// excluded from persistence.
+@MainActor
+final class TabMetadataStore: ObservableObject {
+    static let shared = TabMetadataStore()
+
+    struct StatusEntry: Equatable, Codable {
+        let key: String
+        let value: String
+        let icon: String?  // SF Symbol name, optional
+    }
+
+    /// Status entries keyed by tab UUID, then by status key
+    @Published private(set) var entries: [UUID: [String: StatusEntry]] = [:]
+
+    /// Tracks the last-acknowledged completion token per surface UUID.
+    /// Shared across all SidebarTabManager instances so tab switching
+    /// doesn't lose acknowledgment state.
+    var acknowledgedDoneToken: [UUID: String] = [:]
+
+    /// Keys that are transient and should not be persisted to disk.
+    /// Derived from the agent roster so new agents are covered automatically.
+    private static let transientKeys: Set<String> = {
+        var keys: Set<String> = ["process-running", "command-failed"]
+        for agent in SidebarTabManager.AgentType.allCases {
+            keys.insert(agent.pidKey)
+            keys.insert(agent.activeKey)
+            keys.insert(agent.doneAtKey)
+        }
+        return keys
+    }()
+
+    private var pendingSave: DispatchWorkItem?
+
+    private init() {
+        loadFromDisk()
+    }
+
+    /// Session keys that are mutually exclusive — setting one clears all others.
+    /// A tab can only run one agent at a time.
+    private static let allSessionKeys: Set<String> = {
+        Set(SidebarTabManager.AgentType.allCases.map { $0.sessionKey })
+    }()
+
+    func setStatus(tabId: UUID, key: String, value: String, icon: String? = nil) {
+        if entries[tabId] == nil {
+            entries[tabId] = [:]
+        }
+        // Session keys are mutually exclusive: setting one clears all others
+        // so a tab is always associated with exactly one agent.
+        if Self.allSessionKeys.contains(key) {
+            for other in Self.allSessionKeys where other != key {
+                entries[tabId]?.removeValue(forKey: other)
+            }
+        }
+        entries[tabId]?[key] = StatusEntry(key: key, value: value, icon: icon)
+        if !Self.transientKeys.contains(key) {
+            scheduleSave()
+        }
+    }
+
+    func clearStatus(tabId: UUID, key: String) {
+        entries[tabId]?.removeValue(forKey: key)
+        if entries[tabId]?.isEmpty == true {
+            entries.removeValue(forKey: tabId)
+        }
+        if !Self.transientKeys.contains(key) {
+            scheduleSave()
+        }
+    }
+
+    func statusEntries(for tabId: UUID) -> [StatusEntry] {
+        guard let tabEntries = entries[tabId] else { return [] }
+        return tabEntries.values.sorted { $0.key < $1.key }
+    }
+
+    func removeAll(for tabId: UUID) {
+        entries.removeValue(forKey: tabId)
+        scheduleSave()
+    }
+
+    /// Sweep stale agent sessions whose PIDs are no longer alive.
+    /// Called periodically from SidebarTabManager.
+    func sweepStaleSessions() {
+        // Agent name prefixes whose transient keys should be swept
+        let agentPrefixes = SidebarTabManager.AgentType.allCases.map { $0.rawValue }
+        for (tabId, tabEntries) in entries {
+            for prefix in agentPrefixes {
+                let pidKey = "\(prefix)-pid"
+                if let pidEntry = tabEntries[pidKey],
+                   let pid = Int32(pidEntry.value) {
+                    // kill(pid, 0) checks if the process exists without sending a signal.
+                    // Returns -1 with ESRCH if the process doesn't exist.
+                    if kill(pid, 0) == -1 && errno == ESRCH {
+                        entries[tabId]?.removeValue(forKey: prefix)
+                        entries[tabId]?.removeValue(forKey: "\(prefix)-active")
+                        entries[tabId]?.removeValue(forKey: pidKey)
+                    }
+                }
+            }
+
+            if entries[tabId]?.isEmpty == true {
+                entries.removeValue(forKey: tabId)
+            }
+        }
+    }
+
+    /// Legacy name — calls sweepStaleSessions().
+    func sweepStaleClaude() {
+        sweepStaleSessions()
+    }
+
+    /// Remove entries for surface UUIDs that no longer exist.
+    /// Called after window restoration completes.
+    func pruneOrphanedEntries(liveSurfaceIds: Set<UUID>) {
+        var changed = false
+        for tabId in entries.keys where !liveSurfaceIds.contains(tabId) {
+            entries.removeValue(forKey: tabId)
+            changed = true
+        }
+        if changed {
+            save()
+        }
+    }
+
+    // MARK: - Persistence
+
+    private static var persistenceURL: URL? {
+        guard let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else { return nil }
+        let bundleId = Bundle.main.bundleIdentifier ?? "com.mitchellh.ghostty"
+        let dir = appSupport.appendingPathComponent(bundleId)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("tab-metadata.json")
+    }
+
+    private struct PersistedMetadata: Codable {
+        let entries: [String: [String: StatusEntry]]
+    }
+
+    private func loadFromDisk() {
+        guard let url = Self.persistenceURL,
+              let data = try? Data(contentsOf: url) else { return }
+        guard let persisted = try? JSONDecoder().decode(PersistedMetadata.self, from: data) else { return }
+        for (uuidStr, tabEntries) in persisted.entries {
+            guard let uuid = UUID(uuidString: uuidStr) else { continue }
+            entries[uuid] = tabEntries
+            // Safety net: process-running is transient and should never
+            // persist across restarts. Clear it if it somehow survived.
+            entries[uuid]?.removeValue(forKey: "process-running")
+        }
+    }
+
+    private func scheduleSave() {
+        pendingSave?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.save()
+        }
+        pendingSave = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+    }
+
+    private func save() {
+        guard let url = Self.persistenceURL else { return }
+        var filtered: [String: [String: StatusEntry]] = [:]
+        for (tabId, tabEntries) in entries {
+            let kept = tabEntries.filter { !Self.transientKeys.contains($0.key) }
+            if !kept.isEmpty {
+                filtered[tabId.uuidString] = kept
+            }
+        }
+        let persisted = PersistedMetadata(entries: filtered)
+        guard let data = try? JSONEncoder().encode(persisted) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+}

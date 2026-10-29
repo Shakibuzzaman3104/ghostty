@@ -165,6 +165,16 @@ class AppDelegate: NSObject,
     /// The observer for the app appearance.
     private var appearanceObserver: NSKeyValueObservation?
 
+    /// Periodic timer that flushes restorable state to disk so a force-kill
+    /// or crash doesn't lose all window state (browser-like crash recovery).
+    private var stateFlushTimer: Timer?
+
+    /// Whether the termination in progress should hand persistent terminals
+    /// to their keepers rather than end them. False for a machine shutdown,
+    /// restart or logout: a detached shell outlives the login session and can
+    /// hold logout up, so those end everything for real.
+    private var terminationDetaches = true
+
     /// Signals
     private var signals: [DispatchSourceSignal] = []
 
@@ -199,6 +209,9 @@ class AppDelegate: NSObject,
             // it manually.
             "NSFullScreenMenuItemEverywhere": false,
 
+            // Show the thin card border around sidebar tab cards by default.
+            "SidebarShowCardBorder": true,
+
             // On macOS 26 RC1, the autofill heuristic controller causes unusable levels
             // of slowdowns and CPU usage in the terminal window under certain [unknown]
             // conditions. We don't know exactly why/how. This disables the full heuristic
@@ -209,6 +222,22 @@ class AppDelegate: NSObject,
             // Manual autofill via the `Edit => AutoFill` menu item still work as expected.
             "NSAutoFillHeuristicControllerEnabled": false,
         ])
+
+        // Start IPC socket server early so restored surfaces get the socket path
+        // in their environment. Window restoration runs between willFinish and
+        // didFinish, so the socket must be available by then.
+        GhosttyIPCServer.shared.start()
+
+        // Materialize agent CLI shims (sidebar hooks with zero user setup)
+        // before any surface spawns so GHOSTTY_AGENT_SHIM_DIR is available.
+        AgentShimInstaller.install()
+
+        // Detect which agent CLIs are installed so the new-tab menu shows only
+        // launchable agents. Runs off-main; force past the throttle at launch.
+        AgentDetector.shared.refresh(force: true)
+
+        // Force-load persisted tab metadata so it's available during window restoration.
+        _ = TabMetadataStore.shared
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -328,9 +357,35 @@ class AppDelegate: NSObject,
 
         // Setup our menu
         setupMenuImages()
+        setupTabColorSubmenu()
 
         // Setup signal handlers
         setupSignals()
+
+        // Prune this app's tab metadata after restoration. Keepers are shared
+        // across app instances, so absence from this window tree does not mean
+        // a shell is orphaned. Never kill them automatically on startup; the
+        // explicit `ghostty +keepers --kill=<id>` command handles cleanup.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            var liveSurfaceIds = Set<UUID>()
+            for window in NSApp.windows {
+                guard let controller = window.windowController as? BaseTerminalController else { continue }
+                for surface in controller.surfaceTree {
+                    liveSurfaceIds.insert(surface.id)
+                }
+            }
+            TabMetadataStore.shared.pruneOrphanedEntries(liveSurfaceIds: liveSurfaceIds)
+        }
+
+        // Periodically flush restorable state to disk so a force-kill or crash
+        // doesn't lose all window state. AppKit only encodes state during
+        // graceful quit — this timer ensures state is written every 30 seconds.
+        stateFlushTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
+            NSApp.invalidateRestorableState()
+            for window in NSApp.windows {
+                window.invalidateRestorableState()
+            }
+        }
 
         switch Ghostty.launchSource {
         case .app:
@@ -386,6 +441,10 @@ class AppDelegate: NSObject,
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // An ordinary quit hands persistent terminals to their keepers rather
+        // than ending them. Assume that until something below says otherwise.
+        terminationDetaches = true
+
         let windows = NSApplication.shared.windows
         if windows.isEmpty { return .terminateNow }
 
@@ -405,6 +464,10 @@ class AppDelegate: NSObject,
             if let why = event.attributeDescriptor(forKeyword: keyword) {
                 switch why.typeCodeValue {
                 case kAEShutDown, kAERestart, kAEReallyLogOut:
+                    // The machine going down is not a restart we'll come back
+                    // from, and a detached shell can outlive the login session
+                    // and hold logout up. Kill for real here.
+                    terminationDetaches = false
                     return .terminateNow
 
                 default:
@@ -416,10 +479,43 @@ class AppDelegate: NSObject,
         // If our app says we don't need to confirm, we can exit now.
         if !ghostty.needsConfirmQuit { return .terminateNow }
 
+        // Don't ask about terminals that aren't going anywhere. With
+        // persistent terminals on, quitting hands panes to their keepers and
+        // reopening puts them back, so "you have N terminals open, close them
+        // all?" is warning about a loss that cannot happen. Panes started
+        // before the setting was turned on have no keeper and do end, so the
+        // question is only skipped when every one of them is covered.
+        if terminationDetaches,
+           ghostty.config.paneKeeper,
+           let app = ghostty.app,
+           ghostty_app_panes_without_keeper(app) == 0 {
+            return .terminateNow
+        }
+
         return terminate()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // The window frame is written lazily while dragging. Anything still
+        // waiting has to land now or the next launch reopens somewhere stale.
+        LastWindowPosition.shared.flush()
+
+        // Point of no return: hand keeper-held panes over with their screens
+        // intact so the next launch can pick them straight back up. Surface
+        // teardown isn't guaranteed to run on quit — the process can simply
+        // exit — so this can't be left to it.
+        //
+        // Gated on the setting as it stands right now, not on how each pane
+        // started. Someone who turns Persistent Terminals off and quits means
+        // it: without this, panes opened while it was on would still detach
+        // and then never be reclaimed, because the next launch wouldn't go
+        // looking for them. They get killed instead.
+        if terminationDetaches, ghostty.config.paneKeeper, let app = ghostty.app {
+            ghostty_app_detach_panes(app)
+        }
+
+        GhosttyIPCServer.shared.stop()
+
         // We have no notifications we want to persist after death,
         // so remove them all now. In the future we may want to be
         // more selective and only remove surface-targeted notifications.
@@ -817,9 +913,8 @@ class AppDelegate: NSObject,
         // state restoration system.
         switch config.windowSaveState {
         case "never": UserDefaults.ghostty.setValue(false, forKey: "NSQuitAlwaysKeepsWindows")
-        case "always": UserDefaults.ghostty.setValue(true, forKey: "NSQuitAlwaysKeepsWindows")
         case "default": fallthrough
-        default: UserDefaults.ghostty.removeObject(forKey: "NSQuitAlwaysKeepsWindows")
+        default: UserDefaults.ghostty.setValue(true, forKey: "NSQuitAlwaysKeepsWindows")
         }
 
         // Sync our auto-update settings. If SUEnableAutomaticChecks (in our Info.plist) is
@@ -1197,6 +1292,38 @@ extension AppDelegate {
         self.menuMoveSplitDividerRight?.setImageIfDesired(systemSymbolName: "arrow.right.to.line")
         self.menuFloatOnTop?.setImageIfDesired(systemSymbolName: "square.filled.on.square")
         self.menuFindParent?.setImageIfDesired(systemSymbolName: "text.page.badge.magnifyingglass")
+    }
+
+    /// Build a "Tab Color" submenu and insert it into the View menu after "Change Tab Title...".
+    private func setupTabColorSubmenu() {
+        guard let viewMenu = NSApp.mainMenu?.item(withTitle: "View")?.submenu else { return }
+        guard let changeTabTitleItem = self.menuChangeTabTitle else { return }
+        guard let insertIndex = viewMenu.items.firstIndex(of: changeTabTitleItem) else { return }
+
+        let tabColorSubmenu = NSMenu(title: "Tab Color")
+        for color in TerminalTabColor.allCases {
+            let item = NSMenuItem(
+                title: color.localizedName,
+                action: #selector(BaseTerminalController.setTabColor(_:)),
+                keyEquivalent: ""
+            )
+            item.tag = color.rawValue
+            item.image = color.swatchImage(selected: false)
+            tabColorSubmenu.addItem(item)
+        }
+
+        let tabColorMenuItem = NSMenuItem(title: "Tab Color", action: nil, keyEquivalent: "")
+        tabColorMenuItem.submenu = tabColorSubmenu
+        tabColorMenuItem.setImageIfDesired(systemSymbolName: "paintpalette")
+        viewMenu.insertItem(tabColorMenuItem, at: insertIndex + 1)
+
+        let tabBorderItem = NSMenuItem(
+            title: "Show Tab Border",
+            action: #selector(BaseTerminalController.toggleTabBorder(_:)),
+            keyEquivalent: ""
+        )
+        tabBorderItem.setImageIfDesired(systemSymbolName: "rectangle.inset.filled")
+        viewMenu.insertItem(tabBorderItem, at: insertIndex + 2)
     }
 
     /// Sync all of our menu item keyboard shortcuts with the Ghostty configuration.
