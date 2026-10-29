@@ -1045,7 +1045,9 @@ class AppDelegate: NSObject,
     // MARK: - IB Actions
 
     @IBAction func openConfig(_ sender: Any?) {
-        ghostty.openConfig()
+        let path = ghostty.configFilePath
+        guard !path.isEmpty else { return }
+        ConfigEditorController.shared.show(configPath: path)
     }
 
     @IBAction func reloadConfig(_ sender: Any?) {

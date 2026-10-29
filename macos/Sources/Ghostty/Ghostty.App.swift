@@ -127,8 +127,23 @@ extension Ghostty {
             app.openConfig()
         }
 
+        var configFilePath: String {
+            configPath ?? Ghostty.AllocatedString(ghostty_config_open_path()).string
+        }
+
         func openConfig() {
-            let str = configPath ?? Ghostty.AllocatedString(ghostty_config_open_path()).string
+            let path = configFilePath
+            guard !path.isEmpty else { return }
+            _ = ConfigEditorController.shared
+            NotificationCenter.default.post(
+                name: .ghosttyPresentConfigEditor,
+                object: nil,
+                userInfo: [ConfigEditorController.pathKey: path]
+            )
+        }
+
+        func openConfigExternally() {
+            let str = configFilePath
             guard !str.isEmpty else { return }
             let fileURL = URL(fileURLWithPath: str).absoluteString
             var action = ghostty_action_open_url_s()
