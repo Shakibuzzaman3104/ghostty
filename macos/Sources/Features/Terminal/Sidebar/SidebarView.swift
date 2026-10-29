@@ -638,6 +638,11 @@ private struct ThreadRow: View {
             let primaryTitle = tab.displayTitle
             let subtitle: String? = subtitleVisible ? tab.notificationText : nil
 
+            if let agent = tab.agent {
+                AgentRowIcon(agent: agent, color: titleColor)
+                    .help(agent.displayName)
+            }
+
             VStack(alignment: .leading, spacing: 1) {
                 Text(primaryTitle)
                     .font(.system(size: 11))
@@ -1069,8 +1074,8 @@ private struct AgentMenuIcon: View {
         if let image = Self.menuImage(named: agent.icon) {
             Image(nsImage: image)
         } else {
-            // Missing asset: fall back to a generic glyph rather than a gap.
-            Image(systemName: "chevron.left.forwardslash.chevron.right")
+            // Missing asset: fall back to a glyph rather than a gap.
+            Image(systemName: agent.fallbackSymbol)
         }
     }
 
@@ -1085,6 +1090,31 @@ private struct AgentMenuIcon: View {
         copy.size = NSSize(width: 14, height: 14)
         copy.isTemplate = source.isTemplate
         return copy
+    }
+}
+
+/// The agent's mark at the start of a tab row. Template marks take the
+/// row's text color; full-color ones keep their own.
+private struct AgentRowIcon: View {
+    let agent: SidebarTabManager.AgentType
+    let color: Color
+
+    var body: some View {
+        Group {
+            if let image = NSImage(named: agent.icon) {
+                Image(nsImage: image)
+                    .renderingMode(image.isTemplate ? .template : .original)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+            } else {
+                Image(systemName: agent.fallbackSymbol)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            }
+        }
+        .foregroundColor(color)
+        .frame(width: 12, height: 12)
     }
 }
 

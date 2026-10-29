@@ -340,6 +340,8 @@ final class SidebarStore {
                         hasher.combine(report.progress)
                     }
                     hasher.combine(classifierVerdicts[surface.id])
+                    // An agent starting or exiting changes the row's icon.
+                    hasher.combine(surface.surfaceModel?.foregroundPID)
                 }
                 hasher.combine((window as? TerminalWindow)?.tabColor ?? .none)
             }
@@ -444,7 +446,8 @@ final class SidebarStore {
                 lastActivity: lastActivityTime[wid],
                 createdAt: tabCreationTime[wid],
                 indicator: indicator,
-                activity: activity
+                activity: activity,
+                agent: agent
             )
         }
 

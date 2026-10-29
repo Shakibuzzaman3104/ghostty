@@ -63,6 +63,8 @@ class SidebarTabManager: ObservableObject {
         /// one. Finer-grained than the dot: it names the tool and knows the
         /// difference between reasoning and acting.
         var activity: AgentTranscriptWatcher.Activity?
+        /// The coding agent running in this tab, if any, for its row icon.
+        var agent: AgentType?
 
         /// The last command the shell reported running in this tab, if any.
         /// Shown in the sidebar and offered in the context menu; never typed
@@ -109,6 +111,14 @@ class SidebarTabManager: ObservableObject {
                 t.removeSubrange(range)
             }
             if Self.isPathTitle(t), let location = locationLabel { return location }
+            // Agents mark their titles with a glyph ("⌘ Command Code",
+            // "✳ Claude Code"); the row already shows the agent's icon.
+            if agent != nil, t.count > 2,
+               let first = t.unicodeScalars.first, !CharacterSet.alphanumerics.contains(first),
+               !Self.isPathTitle(t),
+               t.dropFirst().first == " " {
+                t = String(t.dropFirst(2))
+            }
             return t
         }
 
@@ -148,6 +158,7 @@ class SidebarTabManager: ObservableObject {
             lhs.id == rhs.id && lhs.title == rhs.title
                 && lhs.pwd == rhs.pwd && lhs.gitDiffStats == rhs.gitDiffStats
                 && lhs.surfaceId == rhs.surfaceId
+                && lhs.agent == rhs.agent
                 && lhs.statusEntries == rhs.statusEntries
                 && lhs.needsAttention == rhs.needsAttention
                 && lhs.notificationText == rhs.notificationText
@@ -452,6 +463,7 @@ class SidebarTabManager: ObservableObject {
         case cursor
         case antigravity
         case cline
+        case commandcode
 
         /// Human-facing name shown in the new-tab menu.
         var displayName: String {
@@ -464,6 +476,7 @@ class SidebarTabManager: ObservableObject {
             case .cursor: return "Cursor"
             case .antigravity: return "Antigravity"
             case .cline: return "Cline"
+            case .commandcode: return "Command Code"
             }
         }
 
@@ -479,6 +492,7 @@ class SidebarTabManager: ObservableObject {
             case .cursor: return "cursor-agent"
             case .antigravity: return "agy"
             case .cline: return "cline"
+            case .commandcode: return "commandcode"
             }
         }
 
@@ -493,6 +507,17 @@ class SidebarTabManager: ObservableObject {
             case .cursor: return "CursorIcon"
             case .antigravity: return "AntigravityIcon"
             case .cline: return "ClineIcon"
+            case .commandcode: return "CommandCodeIcon"
+            }
+        }
+
+        /// SF Symbol drawn when `icon` has no asset. Command Code ships no
+        /// logo, so it gets the command key; drop a "CommandCodeIcon"
+        /// imageset into Assets.xcassets to use its own mark.
+        var fallbackSymbol: String {
+            switch self {
+            case .commandcode: return "command"
+            default: return "chevron.left.forwardslash.chevron.right"
             }
         }
 
@@ -504,7 +529,7 @@ class SidebarTabManager: ObservableObject {
             // Cline needs -i for its interactive TUI (bare `cline` runs a
             // single non-interactive prompt).
             case .cline: return "-i"
-            case .claude, .codex, .opencode, .grok, .devin, .cursor, .antigravity: return nil
+            case .claude, .codex, .opencode, .grok, .devin, .cursor, .antigravity, .commandcode: return nil
             }
         }
 
@@ -533,6 +558,9 @@ class SidebarTabManager: ObservableObject {
             case .cursor:
                 guard idIsSafe else { return nil }
                 return "cursor-agent --resume \(sessionId)"
+            case .commandcode:
+                guard idIsSafe else { return nil }
+                return "commandcode --resume \(sessionId)"
             case .devin:
                 // Devin exposes no session id in hooks, so there's nothing to
                 // validate — launch its interactive session picker instead.
@@ -557,7 +585,7 @@ class SidebarTabManager: ObservableObject {
         var hasDirectStatus: Bool {
             switch self {
             case .claude, .codex, .grok, .opencode, .devin, .cline: return true
-            case .cursor, .antigravity: return false
+            case .cursor, .antigravity, .commandcode: return false
             }
         }
 
