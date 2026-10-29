@@ -85,6 +85,19 @@ final class ConfigEditorController: NSWindowController, NSWindowDelegate {
         Task { await model.loadReference() }
     }
 
+    // MARK: Close
+
+    // ⌘W sends `close:` (File › Close) and ⌘⇧W `closeWindow:`. Without
+    // these the menu items are disabled while this window is key, like the
+    // About window. performClose still asks about unsaved edits.
+    @IBAction func close(_ sender: Any) {
+        window?.performClose(sender)
+    }
+
+    @IBAction func closeWindow(_ sender: Any) {
+        window?.performClose(sender)
+    }
+
     // MARK: NSWindowDelegate
 
     /// Returning from "Edit in External Editor" lands here.

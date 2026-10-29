@@ -1008,7 +1008,10 @@ palette: Palette = .{},
 /// widgets to show through which isn't generally desirable.
 ///
 /// On macOS, changing this configuration requires restarting Ghostty completely.
-@"background-opacity": f64 = 1.0,
+///
+/// This fork defaults to 0.85 (with `background-blur`) so the terminal
+/// matches the translucent sidebar. Set 1 for an opaque window.
+@"background-opacity": f64 = 0.85,
 
 /// Applies background opacity to cells with an explicit background color
 /// set.
@@ -1054,7 +1057,9 @@ palette: Palette = .{},
 ///
 /// On X11, blur can only be enabled when using the KWin compositor
 /// as a part of KDE Plasma.
-@"background-blur": BackgroundBlur = .false,
+///
+/// This fork defaults to `true`: see `background-opacity`.
+@"background-blur": BackgroundBlur = .true,
 
 /// The opacity level (opposite of transparency) of an unfocused split.
 /// Unfocused splits by default are slightly faded out to make it easier to see
