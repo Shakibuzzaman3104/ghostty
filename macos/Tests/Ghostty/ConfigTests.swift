@@ -153,9 +153,10 @@ struct ConfigTests {
 
     // MARK: - Numeric Properties
 
-    @Test func backgroundOpacityDefaultsToOne() throws {
+    // This fork defaults to a translucent window (see background-opacity).
+    @Test func backgroundOpacityDefaultsToForkValue() throws {
         let config = try TemporaryConfig("")
-        #expect(config.backgroundOpacity == 1.0)
+        #expect(config.backgroundOpacity == 0.85)
     }
 
     @Test func backgroundOpacitySetToCustom() throws {
