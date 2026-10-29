@@ -1,6 +1,8 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+private let sidebarDragType = UTType(exportedAs: "com.shakib.ghostty.sidebar-tab")
+
 // MARK: - SidebarTheme
 
 struct SidebarTheme: Equatable {
@@ -75,6 +77,7 @@ private struct GroupDropTarget: Equatable {
 /// Each tab window hosts its own sidebar. A drag can cross those view trees,
 /// so keeping the state in one shared object keeps validation and indicators
 /// in sync for the whole AppKit tab group.
+@MainActor
 private final class SidebarDragState: ObservableObject {
     static let shared = SidebarDragState()
     @Published var draggingTabID: ObjectIdentifier?
@@ -83,6 +86,108 @@ private final class SidebarDragState: ObservableObject {
     @Published var groupDropTarget: GroupDropTarget?
     /// Incremented at every drag start so cleanup belongs to one session.
     @Published var dragGeneration = 0
+    var surfaceID: UUID?
+    var accepted = false
+    private var timer: Timer?
+    private weak var sourceView: NSView?
+    private var views = NSHashTable<NSView>.weakObjects()
+    private var escapeMonitor: Any?
+    private var cancelled = false
+
+    func register(_ view: NSView) { views.add(view) }
+
+    /// Resolve the UUID through live managers instead of retaining tab windows.
+    func source() -> (SidebarTabManager, SidebarTabManager.TabItem)? {
+        guard let surfaceID else { return nil }
+        for controller in TerminalController.all {
+            guard let manager = controller.sidebarTabManager,
+                  let tab = manager.tabs.first(where: { $0.surfaceId == surfaceID }),
+                  manager.window(for: tab) != nil else { continue }
+            return (manager, tab)
+        }
+        return nil
+    }
+
+    private func contains(_ view: NSView, point: NSPoint) -> Bool {
+        guard let window = view.window, window.isVisible else { return false }
+        return view.bounds.contains(view.convert(window.convertPoint(fromScreen: point), from: nil))
+    }
+
+    func start(tab: SidebarTabManager.TabItem, manager: SidebarTabManager) {
+        timer?.invalidate()
+        if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
+        SidebarDragGhost.shared.hide()
+        surfaceID = tab.surfaceId
+        accepted = false
+        cancelled = false
+        escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            MainActor.assumeIsolated {
+                if event.keyCode == 53 { self?.cancelled = true }
+            }
+            return event
+        }
+        sourceView = views.allObjects.first { $0.window === manager.window }
+        let generation = dragGeneration
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] timer in
+            // This timer is installed only on the main run loop, which owns
+            // the AppKit views and the shared drag state it reads.
+            MainActor.assumeIsolated {
+                guard let self else { timer.invalidate(); return }
+                self.updateDrag(timer: timer, generation: generation)
+            }
+        }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func updateDrag(timer: Timer, generation: Int) {
+        let point = NSEvent.mouseLocation
+        if NSEvent.pressedMouseButtons & 1 == 0 {
+            timer.invalidate()
+            self.timer = nil
+            if let monitor = escapeMonitor { NSEvent.removeMonitor(monitor) }
+            escapeMonitor = nil
+            SidebarDragGhost.shared.hide()
+            // performDrop may arrive just after mouse-up. Keep the session
+            // identity until its delegates have had a chance to accept it.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                guard let self, self.dragGeneration == generation else { return }
+                defer { self.surfaceID = nil }
+                guard !self.accepted, !self.cancelled, let (manager, tab) = self.source() else { return }
+                let frontWindow = NSApp.orderedWindows.first {
+                    $0 is TerminalWindow && $0.isVisible && $0.frame.contains(point)
+                }
+                guard !self.views.allObjects.contains(where: {
+                    $0.window === frontWindow && self.contains($0, point: point)
+                }) else { return }
+                if let target = manager.dropTargetWindow(for: tab, at: point) {
+                    manager.moveTab(tab, to: target)
+                } else if !(manager.window(for: tab)?.frame.contains(point) ?? true) {
+                    manager.moveTabToNewWindow(tab, at: point)
+                }
+            }
+        } else if let sourceView, contains(sourceView, point: point) {
+            SidebarDragGhost.shared.hide()
+        } else if let (manager, tab) = source() {
+            let hint = manager.dropTargetWindow(for: tab, at: point).map { "Move to \($0.title)" }
+                ?? "Move to New Window"
+            SidebarDragGhost.shared.show(title: tab.displayTitle, hint: hint, at: point)
+        }
+    }
+}
+
+/// A non-interactive view supplies the sidebar's current screen bounds.
+private struct SidebarDragBounds: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = PassThroughView()
+        SidebarDragState.shared.register(view)
+        return view
+    }
+    func updateNSView(_ view: NSView, context: Context) {}
+
+    private final class PassThroughView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
 }
 
 /// An NSItemProvider that fires a callback when the drag session ends.
@@ -166,7 +271,7 @@ struct SidebarView: View {
                             DropIndicator().offset(y: 1)
                         }
                     }
-                    .onDrop(of: [UTType.text], delegate: ProjectGroupDropDelegate(
+                    .onDrop(of: [sidebarDragType], delegate: ProjectGroupDropDelegate(
                         tabManager: tabManager,
                         currentGroup: group,
                         draggingTabID: $dragState.draggingTabID,
@@ -224,6 +329,7 @@ struct SidebarView: View {
         // actually arrives.
         .onPreferenceChange(SidebarCardFramePreferenceKey.self) { tabCardFrames.value = $0 }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(SidebarDragBounds())
         .background(.clear)
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 0) {
@@ -280,7 +386,11 @@ private struct ProjectSection: View {
     /// system drag session ends — including cancelled drags, for which
     /// SwiftUI provides no other callback.
     private func makeDragProvider(payload: String) -> NSItemProvider {
-        let provider = SidebarDragItemProvider(object: payload as NSString)
+        let provider = SidebarDragItemProvider()
+        provider.registerDataRepresentation(forTypeIdentifier: sidebarDragType.identifier, visibility: .ownProcess) { completion in
+            completion(payload.data(using: .utf8), nil)
+            return nil
+        }
         let draggingTab = $draggingTabID
         let draggingGroup = $draggingGroupID
         let tabTarget = $tabDropTarget
@@ -380,7 +490,7 @@ private struct ProjectSection: View {
                     Color.clear
                         .frame(height: 10)
                         .contentShape(Rectangle())
-                        .onDrop(of: [UTType.text], delegate: TabTrailingDropDelegate(
+                        .onDrop(of: [sidebarDragType], delegate: TabTrailingDropDelegate(
                             tabManager: tabManager,
                             currentGroup: group,
                             draggingTabID: $draggingTabID,
@@ -557,9 +667,10 @@ private struct ThreadRow: View {
             groupDropTarget = nil
             draggingTabID = tab.id
             dragGeneration += 1
+            SidebarDragState.shared.start(tab: tab, manager: tabManager)
             return makeDragProvider(tab.surfaceId?.uuidString ?? "tab")
         }
-        .onDrop(of: [UTType.text], delegate: TabDropDelegate(
+        .onDrop(of: [sidebarDragType], delegate: TabDropDelegate(
             tabManager: tabManager,
             currentTab: tab,
             groupID: groupID,
@@ -616,6 +727,21 @@ private struct ThreadRow: View {
                 Button("Open in Finder") {
                     NSWorkspace.shared.open(URL(fileURLWithPath: (pwd as NSString).expandingTildeInPath))
                 }
+            }
+
+            Button("Move Tab to New Window") {
+                tabManager.moveTabToNewWindow(tab)
+            }
+            .disabled(!tabManager.canMoveTabToNewWindow(tab))
+
+            let targets = tabManager.otherWindowTargets(for: tab)
+            if !targets.isEmpty {
+                Menu("Move Tab to") {
+                    ForEach(targets) { target in
+                        Button(target.title) { tabManager.moveTab(tab, to: target) }
+                    }
+                }
+                .disabled(tabManager.window(for: tab)?.styleMask.contains(.fullScreen) ?? true)
             }
 
             Divider()
@@ -862,6 +988,11 @@ private struct ProjectGroupDropDelegate: DropDelegate {
     @Binding var tabDropTarget: TabDropTarget?
     @Binding var groupDropTarget: GroupDropTarget?
 
+    private var isCrossWindowTab: Bool {
+        guard draggingGroupID == nil, let (source, tab) = SidebarDragState.shared.source() else { return false }
+        return !tabManager.tabs.contains(where: { $0.id == tab.id }) && source !== tabManager
+    }
+
     /// The "Home" and "Other" groups are always pinned last, so they can
     /// neither be moved nor serve as a reorder target.
     private var isValidGroupDrag: Bool {
@@ -895,12 +1026,12 @@ private struct ProjectGroupDropDelegate: DropDelegate {
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        guard isValidGroupDrag else { return DropProposal(operation: .forbidden) }
+        guard isValidGroupDrag || isCrossWindowTab else { return DropProposal(operation: .forbidden) }
         return DropProposal(operation: .move)
     }
 
     func validateDrop(info: DropInfo) -> Bool {
-        isValidGroupDrag
+        isValidGroupDrag || isCrossWindowTab
     }
 
     func performDrop(info: DropInfo) -> Bool {
@@ -910,7 +1041,13 @@ private struct ProjectGroupDropDelegate: DropDelegate {
             tabDropTarget = nil
             groupDropTarget = nil
         }
+        if isCrossWindowTab, let (source, tab) = SidebarDragState.shared.source(),
+           let target = tabManager.ownWindowTarget() {
+            SidebarDragState.shared.accepted = true
+            return source.moveTab(tab, to: target)
+        }
         guard isValidGroupDrag, let draggingGroupID else { return false }
+        SidebarDragState.shared.accepted = true
 
         // Switch to manual sort mode and perform the move
         tabManager.setProjectSortMode(.manual)
@@ -991,7 +1128,12 @@ private struct TabDropDelegate: DropDelegate {
 
     /// Tab drags are restricted to reordering within the same project.
     private var isValidTabDrag: Bool {
-        draggingTabID != nil && draggingTabID != currentTab.id && draggingTabGroupID == groupID
+        isCrossWindowTab || (draggingTabID != nil && draggingTabID != currentTab.id && draggingTabGroupID == groupID)
+    }
+
+    private var isCrossWindowTab: Bool {
+        guard draggingGroupID == nil, let (_, tab) = SidebarDragState.shared.source() else { return false }
+        return !tabManager.tabs.contains(where: { $0.id == tab.id })
     }
 
     /// See ProjectGroupDropDelegate.insertsBelow.
@@ -1060,6 +1202,7 @@ private struct TabDropDelegate: DropDelegate {
         // Group drag dropped over a tab row: reorder the groups.
         if isGroupDrag {
             guard isValidGroupDrag, let draggingGroupID else { return false }
+            SidebarDragState.shared.accepted = true
             tabManager.setProjectSortMode(.manual)
             tabManager.moveProjectGroup(fromId: draggingGroupID, toId: groupID)
             return true
@@ -1067,10 +1210,17 @@ private struct TabDropDelegate: DropDelegate {
 
         // Tab reorder. Keep identities intact across the drop boundary; the
         // manager derives the single AppKit/persistence order from them.
+        if isCrossWindowTab, let (source, tab) = SidebarDragState.shared.source(),
+           let target = tabManager.ownWindowTarget() {
+            SidebarDragState.shared.accepted = true
+            return source.moveTab(tab, to: target, relativeTo: currentTab,
+                                  position: info.location.y >= currentRowHeight / 2 ? .after : .before)
+        }
         guard isValidTabDrag,
               let draggingTabID,
               let movingTab = tabManager.tabs.first(where: { $0.id == draggingTabID })
         else { return false }
+        SidebarDragState.shared.accepted = true
 
         // Compute the insertion side from the actual drop location, relative to
         // this row (the same row `targetIndex` resolves to). Reading it from the
@@ -1117,7 +1267,12 @@ private struct TabTrailingDropDelegate: DropDelegate {
     }
 
     private var isValidTabDrag: Bool {
-        movingTab?.groupID == currentGroup.id && targetTab != nil
+        isCrossWindowTab || (movingTab?.groupID == currentGroup.id && targetTab != nil)
+    }
+
+    private var isCrossWindowTab: Bool {
+        guard draggingGroupID == nil, let (_, tab) = SidebarDragState.shared.source() else { return false }
+        return !tabManager.tabs.contains(where: { $0.id == tab.id })
     }
 
     private func updateTarget() {
@@ -1156,7 +1311,13 @@ private struct TabTrailingDropDelegate: DropDelegate {
             tabDropTarget = nil
             groupDropTarget = nil
         }
+        if isCrossWindowTab, let (source, tab) = SidebarDragState.shared.source(),
+           let target = tabManager.ownWindowTarget() {
+            SidebarDragState.shared.accepted = true
+            return source.moveTab(tab, to: target)
+        }
         guard let movingTab, let targetTab, isValidTabDrag else { return false }
+        SidebarDragState.shared.accepted = true
 
         if tabManager.projectSortMode != .manual {
             tabManager.setProjectSortMode(.manual)

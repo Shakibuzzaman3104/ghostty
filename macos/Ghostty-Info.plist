@@ -112,6 +112,16 @@
 	<array>
 		<dict>
 			<key>UTTypeIdentifier</key>
+			<string>com.shakib.ghostty.sidebar-tab</string>
+			<key>UTTypeDescription</key>
+			<string>Ghostty Sidebar Tab</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
 			<string>com.mitchellh.ghosttySurfaceId</string>
 			<key>UTTypeDescription</key>
 			<string>Ghostty Surface Identifier</string>

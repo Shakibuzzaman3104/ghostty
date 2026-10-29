@@ -656,6 +656,135 @@ class SidebarTabManager: ObservableObject {
         }
     }
 
+    // MARK: - Moving Between Windows
+
+    struct WindowTarget: Identifiable {
+        let id: ObjectIdentifier
+        let title: String
+        let window: NSWindow
+    }
+
+    private func windowTarget(for window: NSWindow, withCount: Bool) -> WindowTarget {
+        let selected = window.tabGroup?.selectedWindow ?? window
+        let count = window.tabGroup?.windows.count ?? 1
+        var title = selected.title.isEmpty ? "Window" : selected.title
+        if title.hasPrefix("\u{1F514} ") { title = String(title.dropFirst(2)) }
+        if withCount && count > 1 { title += " (\(count) tabs)" }
+        return WindowTarget(id: window.tabGroup.map { ObjectIdentifier($0) } ?? ObjectIdentifier(window),
+                            title: title, window: selected)
+    }
+
+    func ownWindowTarget() -> WindowTarget? {
+        window.map { windowTarget(for: $0, withCount: false) }
+    }
+
+    private func isOwnGroup(_ window: NSWindow, for tab: TabItem) -> Bool {
+        guard let source = self.window(for: tab) else { return false }
+        return window === source || (source.tabGroup != nil && window.tabGroup === source.tabGroup)
+    }
+
+    func otherWindowTargets(for tab: TabItem) -> [WindowTarget] {
+        guard window(for: tab) != nil else { return [] }
+        var seen: Set<ObjectIdentifier> = []
+        return TerminalController.all.compactMap { controller in
+            guard let window = controller.window, !isOwnGroup(window, for: tab),
+                  !window.styleMask.contains(.fullScreen) else { return nil }
+            let target = windowTarget(for: window, withCount: true)
+            return seen.insert(target.id).inserted ? target : nil
+        }
+    }
+
+    func canMoveTabToNewWindow(_ tab: TabItem) -> Bool {
+        guard let window = window(for: tab), !window.styleMask.contains(.fullScreen) else { return false }
+        return (window.tabGroup?.windows.count ?? 1) > 1
+    }
+
+    func moveTabToNewWindow(_ tab: TabItem, at point: NSPoint? = nil) {
+        guard canMoveTabToNewWindow(tab), let window = window(for: tab),
+              let group = window.tabGroup else { return }
+        let frame = window.frame
+        let remaining = group.windows.filter { $0 !== window }
+        var newFrame = frame
+        if let point, !frame.contains(point) {
+            newFrame.origin = NSPoint(x: point.x - 40, y: point.y + 20 - frame.height)
+        } else {
+            newFrame.origin = NSPoint(x: frame.origin.x + 40, y: frame.origin.y - 40)
+        }
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(point ?? frame.origin) }) ?? window.screen {
+            let visible = screen.visibleFrame
+            newFrame.origin.x = max(visible.minX, min(newFrame.origin.x, visible.maxX - newFrame.width))
+            newFrame.origin.y = max(visible.minY, min(newFrame.origin.y, visible.maxY - newFrame.height))
+        }
+        group.removeWindow(window)
+        Self.restoreFrame(frame, for: remaining)
+        window.setFrame(newFrame, display: true)
+        window.makeKeyAndOrderFront(nil)
+        refresh()
+        DispatchQueue.main.async { [weak window] in
+            guard let window, window.frame != newFrame else { return }
+            window.setFrame(newFrame, display: true)
+        }
+    }
+
+    func dropTargetWindow(for tab: TabItem, at point: NSPoint) -> WindowTarget? {
+        for window in NSApp.orderedWindows {
+            guard window is TerminalWindow, window.isVisible, window.frame.contains(point) else { continue }
+            if isOwnGroup(window, for: tab) { return nil }
+            return windowTarget(for: window, withCount: false)
+        }
+        return nil
+    }
+
+    /// Preserve both group frames because AppKit may cascade a detached window.
+    @discardableResult
+    func moveTab(
+        _ tab: TabItem,
+        to target: WindowTarget,
+        relativeTo targetTab: TabItem? = nil,
+        position: TabInsertionPosition = .after
+    ) -> Bool {
+        guard let window = window(for: tab), !isOwnGroup(target.window, for: tab),
+              !window.styleMask.contains(.fullScreen),
+              !target.window.styleMask.contains(.fullScreen) else { return false }
+        let group = window.tabGroup
+        let sourceFrame = window.frame
+        let sourceWindows = (group?.windows ?? []).filter { $0 !== window }
+        let targetWindows = target.window.tabGroup?.windows ?? [target.window]
+        let anchor = targetTab.flatMap { tab in targetWindows.first { ObjectIdentifier($0) == tab.id } }
+            ?? targetWindows.last ?? target.window
+        let targetFrame = anchor.frame
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0
+        group?.removeWindow(window)
+        Self.restoreFrame(sourceFrame, for: sourceWindows)
+        window.setFrame(targetFrame, display: false)
+        let added = anchor.addTabbedWindowSafely(window, ordered: targetTab == nil || position == .after ? .above : .below)
+        if added {
+            Self.restoreFrame(targetFrame, for: anchor.tabGroup?.windows ?? [anchor, window])
+            let windows = anchor.tabGroup?.windows ?? [anchor, window]
+            let ids = windows.compactMap { store.tabOrderKey(for: $0) }
+            if ids.count == windows.count { store.persistTabOrder(ids, for: windows) }
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            if let sourceAnchor = sourceWindows.last {
+                sourceAnchor.addTabbedWindowSafely(window, ordered: .above)
+                Self.restoreFrame(sourceFrame, for: sourceAnchor.tabGroup?.windows ?? [sourceAnchor, window])
+            } else {
+                window.setFrame(sourceFrame, display: true)
+            }
+            window.makeKeyAndOrderFront(nil)
+        }
+        NSAnimationContext.endGrouping()
+        refresh()
+        return added
+    }
+
+    private static func restoreFrame(_ frame: NSRect, for windows: [NSWindow]) {
+        for window in windows where window.frame != frame {
+            window.setFrame(frame, display: false)
+        }
+    }
+
     enum TabInsertionPosition: Equatable {
         case before
         case after
