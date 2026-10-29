@@ -1097,6 +1097,14 @@ palette: Palette = .{},
 /// of whatever is behind the window show through.
 @"sidebar-opacity": f64 = 1.0,
 
+/// Whether to show the git panel at the bottom of the sidebar. The panel
+/// shows the current branch, pending changes, and offers checkout, commit,
+/// push, and pull for the working directory of the selected tab. The panel
+/// can also be collapsed to a single branch line by clicking its header.
+///
+/// Default: `true`
+@"sidebar-git": bool = true,
+
 /// Control when Ghostty preserves a zoomed split. Under normal circumstances,
 /// any operation that changes focus or layout of the split tree in a window
 /// will unzoom any zoomed split. This configuration allows you to control

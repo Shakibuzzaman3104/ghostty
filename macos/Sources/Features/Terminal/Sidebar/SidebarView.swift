@@ -224,6 +224,7 @@ struct SidebarView: View {
     @ObservedObject var updateViewModel: UpdateViewModel
     var theme: SidebarTheme
     var fields: Set<SidebarField> = SidebarField.defaultFields
+    var gitModel: GitPanelModel? = nil
 
     @ObservedObject private var dragState = SidebarDragState.shared
     @State private var hoveredTabID: ObjectIdentifier?
@@ -335,6 +336,9 @@ struct SidebarView: View {
         .background(.clear)
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 0) {
+                if let gitModel {
+                    GitPanelView(model: gitModel, theme: theme)
+                }
                 if !updateViewModel.state.isHidden {
                     HStack {
                         Spacer()
@@ -344,6 +348,12 @@ struct SidebarView: View {
                     .padding(.vertical, 8)
                 }
             }
+        }
+        .onReceive(tabManager.$tabs) { tabs in
+            gitModel?.pwd = tabs.first { $0.id == tabManager.selectedTabID }?.pwd
+        }
+        .onReceive(tabManager.$selectedTabID) { selectedID in
+            gitModel?.pwd = tabManager.tabs.first { $0.id == selectedID }?.pwd
         }
         .overlay(SidebarClickOverlay(
             frames: tabCardFrames,

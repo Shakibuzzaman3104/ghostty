@@ -571,6 +571,17 @@ extension Ghostty {
             return max(0, min(1, v))
         }
 
+        /// Whether to show the git panel at the bottom of the sidebar.
+        var sidebarGit: Bool {
+            guard let config = self.config else { return true }
+            var v = false
+            let key = "sidebar-git"
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else {
+                return true
+            }
+            return v
+        }
+
         /// Which fields to show in sidebar tab cards.
         var sidebarFields: Set<SidebarField> {
             guard let config = self.config else { return SidebarField.defaultFields }
