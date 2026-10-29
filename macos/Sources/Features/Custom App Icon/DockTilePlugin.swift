@@ -12,7 +12,7 @@ class DockTilePlugin: NSObject, NSDockTilePlugIn {
     #if DEBUG
     private let ghosttyUserDefaults = UserDefaults(suiteName: "com.mitchellh.ghostty.debug")
     #else
-    private let ghosttyUserDefaults = UserDefaults(suiteName: "com.mitchellh.ghostty")
+    private let ghosttyUserDefaults = UserDefaults(suiteName: "com.shakib.ghostty")
     #endif
 
     private var iconChangeObserver: Any?

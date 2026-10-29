@@ -6,7 +6,9 @@ import OSLog
 /// A Unix domain socket server that allows external processes to control Ghostty tabs.
 ///
 /// Protocol: newline-delimited JSON over a Unix domain socket at
-/// `/tmp/ghostty-{uid}-{bundle-id}.sock`.
+/// `~/Library/Application Support/{bundle-id}/ghostty.sock`, or a private
+/// per-user temporary directory if the path is too long. Only peers with the
+/// same user ID are served.
 ///
 /// Request format:
 /// ```json
@@ -28,6 +30,7 @@ final class GhosttyIPCServer {
     )
 
     private var serverFd: Int32 = -1
+    private var ownsSocket = false
     private var acceptSource: DispatchSourceRead?
     private var clients: [Int32: ClientConnection] = [:]
     /// The socket path this server is listening on. Exposed for `BaseTerminalController`
@@ -51,16 +54,34 @@ final class GhosttyIPCServer {
 
     func start() {
         let uid = getuid()
-        socketPath = Self.defaultSocketPath(uid: uid)
+        socketPath = Self.defaultSocketPath()
+        if socketPath.utf8CString.count > MemoryLayout.size(ofValue: sockaddr_un().sun_path) {
+            socketPath = (NSTemporaryDirectory() as NSString)
+                .appendingPathComponent("ghostty-ipc/ghostty.sock")
+        }
+        Self.logger.info("IPC: selected socket path \(self.socketPath)")
+        guard socketPath.utf8CString.count <= MemoryLayout.size(ofValue: sockaddr_un().sun_path) else {
+            Self.logger.warning("IPC: socket path too long")
+            return
+        }
+        guard Self.prepareSocketDirectory((socketPath as NSString).deletingLastPathComponent, uid: uid) else {
+            return
+        }
 
-        // Sweep sockets left behind by builds that keyed the path on the pid.
-        Self.cleanupStaleSockets(uid: uid, keeping: socketPath)
-
-        // The path outlives the app now, so it may well still be on disk —
-        // from our own last run, or from a second copy launched with `open -n`.
-        // Take it over either way: the newest instance is the one holding the
-        // user's tabs, so it's the one surviving shells need to reach.
-        unlink(socketPath)
+        var existing = stat()
+        if lstat(socketPath, &existing) == 0 {
+            guard (existing.st_mode & S_IFMT) == S_IFSOCK, existing.st_uid == uid else {
+                Self.logger.warning("IPC: refusing to unlink unsafe path \(self.socketPath)")
+                return
+            }
+            guard unlink(socketPath) == 0 else {
+                Self.logger.warning("IPC: failed to unlink socket: \(errno)")
+                return
+            }
+        } else if errno != ENOENT {
+            Self.logger.warning("IPC: failed to inspect socket path: \(errno)")
+            return
+        }
 
         // Create socket
         serverFd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -87,11 +108,13 @@ final class GhosttyIPCServer {
             }
         }
 
+        let oldMask = umask(0o177)
         let bindResult = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
                 bind(serverFd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
+        umask(oldMask)
         guard bindResult == 0 else {
             Self.logger.warning("IPC: failed to bind socket: \(errno)")
             close(serverFd)
@@ -99,6 +122,7 @@ final class GhosttyIPCServer {
             return
         }
 
+        ownsSocket = true
         // Set permissions to user-only
         chmod(socketPath, 0o600)
 
@@ -135,50 +159,41 @@ final class GhosttyIPCServer {
     ///
     /// Deliberately free of the pid. A shell can outlive the app that spawned
     /// it and keeps whatever `GHOSTTY_SOCKET` value it was born with, so a
-    /// pid-keyed path stopped resolving the moment Ghostty restarted. The
-    /// agent shim exits quietly when its socket is missing, so those tabs went
-    /// silent with no error to explain it. Keying on the bundle id instead
+    /// pid-keyed path stopped resolving the moment Ghostty restarted, and
+    /// shell hooks went silent with no error to explain it. Keying on the
+    /// bundle id instead
     /// keeps the path stable across restarts while still stopping a debug
     /// build from taking over the release build's socket.
-    private static func defaultSocketPath(uid: uid_t) -> String {
-        let bundle = Bundle.main.bundleIdentifier ?? "ghostty"
-        return "/tmp/ghostty-\(uid)-\(bundle).sock"
+    private static func defaultSocketPath() -> String {
+        let bundle = Bundle.main.bundleIdentifier ?? "com.mitchellh.ghostty"
+        return (NSHomeDirectory() as NSString)
+            .appendingPathComponent("Library/Application Support/\(bundle)/ghostty.sock")
     }
 
-    /// Remove sockets left behind by dead Ghostty instances.
-    ///
-    /// Older builds bound `/tmp/ghostty-{uid}-{pid}.sock`, and older ones
-    /// still `/tmp/ghostty-{uid}.sock`. Neither is used now, but copies
-    /// outlive a crash, so sweep any whose owning process is gone.
-    private static func cleanupStaleSockets(uid: uid_t, keeping ourPath: String) {
-        let fm = FileManager.default
-        let prefix = "ghostty-\(uid)"
-        guard let contents = try? fm.contentsOfDirectory(atPath: "/tmp") else { return }
-        for name in contents {
-            guard name.hasPrefix(prefix) && name.hasSuffix(".sock") else { continue }
-            let path = "/tmp/\(name)"
-            guard path != ourPath else { continue }
-
-            // Extract PID from the filename if present (ghostty-{uid}-{pid}.sock)
-            let afterPrefix = name.dropFirst(prefix.count)
-            if afterPrefix.hasPrefix("-"), let dotIndex = afterPrefix.lastIndex(of: ".") {
-                let pidStr = afterPrefix.dropFirst().prefix(upTo: dotIndex)
-                // Anything that doesn't parse as a pid is another build's
-                // stable path — leave it be, it may well be listening.
-                if let pid = Int32(pidStr) {
-                    // Check if the process is still alive
-                    if kill(pid, 0) == -1 && errno == ESRCH {
-                        unlink(path)
-                        logger.info("IPC: cleaned up stale socket \(path)")
-                    }
-                }
-            } else if afterPrefix == ".sock" {
-                // Legacy socket without PID suffix — remove it
-                unlink(path)
-                logger.info("IPC: cleaned up legacy socket \(path)")
-            }
+    private static func prepareSocketDirectory(_ path: String, uid: uid_t) -> Bool {
+        do {
+            try FileManager.default.createDirectory(
+                atPath: path,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        } catch {
+            Self.logger.warning("IPC: failed to create socket directory: \(error)")
+            return false
         }
+        var info = stat()
+        guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
+              info.st_uid == uid else {
+            Self.logger.warning("IPC: socket directory is not owned by the current user: \(path)")
+            return false
+        }
+        guard chmod(path, 0o700) == 0 else {
+            Self.logger.warning("IPC: failed to secure socket directory: \(errno)")
+            return false
+        }
+        return true
     }
+
 
     func stop() {
         // Cancel accept source
@@ -192,8 +207,9 @@ final class GhosttyIPCServer {
         clients.removeAll()
 
         // Remove socket file
-        if !socketPath.isEmpty {
+        if ownsSocket {
             unlink(socketPath)
+            ownsSocket = false
         }
 
         if serverFd >= 0 {
@@ -215,6 +231,14 @@ final class GhosttyIPCServer {
             }
         }
         guard clientFd >= 0 else { return }
+
+        var peerUid: uid_t = 0
+        var peerGid: gid_t = 0
+        guard getpeereid(clientFd, &peerUid, &peerGid) == 0, peerUid == getuid() else {
+            Self.logger.warning("IPC: rejected client with invalid peer credentials")
+            close(clientFd)
+            return
+        }
 
         // Set non-blocking
         let flags = fcntl(clientFd, F_GETFL)

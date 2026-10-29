@@ -45,9 +45,8 @@ final class AgentDetector: ObservableObject {
         let now = ProcessInfo.processInfo.systemUptime
         if !force && (scanning || now - lastScan < 10) { return }
         scanning = true
-        let shimDir = AgentShimInstaller.shimDirectory
         DispatchQueue.global(qos: .utility).async {
-            let found = Self.scan(shimDir: shimDir)
+            let found = Self.scan()
             DispatchQueue.main.async {
                 self.lastScan = ProcessInfo.processInfo.systemUptime
                 self.scanning = false
@@ -57,12 +56,12 @@ final class AgentDetector: ObservableObject {
     }
 
     /// Test every known agent binary against the login-shell PATH.
-    private static func scan(shimDir: String?) -> Set<SidebarTabManager.AgentType> {
+    private static func scan() -> Set<SidebarTabManager.AgentType> {
         let dirs = loginShellPath()
         let fm = FileManager.default
         var result: Set<SidebarTabManager.AgentType> = []
         for agent in SidebarTabManager.AgentType.allCases {
-            for dir in dirs where dir != shimDir {
+            for dir in dirs {
                 let candidate = (dir as NSString).appendingPathComponent(agent.binaryName)
                 if fm.isExecutableFile(atPath: candidate) {
                     result.insert(agent)

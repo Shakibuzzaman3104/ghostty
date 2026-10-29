@@ -8,6 +8,9 @@
 #   scripts/fork-build.sh [Debug|ReleaseLocal|Release]   (default ReleaseLocal)
 #
 # Output: macos/build/<Configuration>/Ghostty.app
+#
+# GhosttyKit is built for this Mac only; set XCFRAMEWORK_TARGET=universal for
+# an Intel + Apple Silicon build.
 
 set -euo pipefail
 
@@ -24,11 +27,18 @@ Debug) OPTIMIZE="Debug" ;;
 esac
 
 cd "$ROOT"
-zig build -Doptimize="$OPTIMIZE" -Demit-macos-app=false
+XCFRAMEWORK_TARGET="${XCFRAMEWORK_TARGET:-native}"
+zig build -Doptimize="$OPTIMIZE" -Demit-macos-app=false -Dxcframework-target="$XCFRAMEWORK_TARGET"
+
+# A native GhosttyKit has only this Mac's slice, so the app must match.
+ARCH_ARGS=()
+if [ "$XCFRAMEWORK_TARGET" = native ]; then
+	ARCH_ARGS=(ARCHS="$(uname -m)" ONLY_ACTIVE_ARCH=YES)
+fi
 
 cd "$ROOT/macos"
 LOG="$(mktemp -t ghostty-xcodebuild)"
-if ! xcodebuild -target Ghostty -configuration "$CONFIGURATION" >"$LOG" 2>&1; then
+if ! xcodebuild -target Ghostty -configuration "$CONFIGURATION" "${ARCH_ARGS[@]}" >"$LOG" 2>&1; then
 	grep -E "error:" "$LOG" || tail -40 "$LOG"
 	echo "xcodebuild failed; full log: $LOG" >&2
 	exit 1

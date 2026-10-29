@@ -64,6 +64,25 @@ class SidebarTabManager: ObservableObject {
         /// difference between reasoning and acting.
         var activity: AgentTranscriptWatcher.Activity?
 
+        /// The last command the shell reported running in this tab, if any.
+        /// Shown in the sidebar and offered in the context menu; never typed
+        /// into the terminal without the user asking.
+        var lastCommand: String? {
+            guard let value = statusEntries.first(where: { $0.key == "last-command" })?.value,
+                  !value.isEmpty else { return nil }
+            return value
+        }
+
+        /// The command that resumes this tab's last agent session, if the
+        /// agent supports it and a session id was recorded.
+        var agentResume: (agent: AgentType, command: String)? {
+            guard let agent = AgentType.detect(from: statusEntries),
+                  let sessionId = statusEntries.first(where: { $0.key == agent.sessionKey })?.value,
+                  !sessionId.isEmpty,
+                  let command = agent.resumeCommand(sessionId: sessionId) else { return nil }
+            return (agent, command)
+        }
+
         /// The last path component of the pwd, for compact display.
         var directoryName: String? {
             guard let pwd, !pwd.isEmpty else { return nil }
@@ -346,9 +365,31 @@ class SidebarTabManager: ObservableObject {
 
     // MARK: - Git Actions passthroughs
 
-    func gitCommit(projectRoot: String) { store.gitCommit(projectRoot: projectRoot) }
+    func gitCommit(projectRoot: String) {
+        guard confirmStageAll(projectRoot: projectRoot, andPush: false) else { return }
+        store.gitCommit(projectRoot: projectRoot)
+    }
     func gitPush(projectRoot: String) { store.gitPush(projectRoot: projectRoot) }
-    func gitCommitAndPush(projectRoot: String) { store.gitCommitAndPush(projectRoot: projectRoot) }
+    func gitCommitAndPush(projectRoot: String) {
+        guard confirmStageAll(projectRoot: projectRoot, andPush: true) else { return }
+        store.gitCommitAndPush(projectRoot: projectRoot)
+    }
+
+    /// Commit stages everything with `git add -A`, untracked files included,
+    /// so ask first.
+    private func confirmStageAll(projectRoot: String, andPush: Bool) -> Bool {
+        let alert = NSAlert()
+        let name = (projectRoot as NSString).lastPathComponent
+        alert.messageText = andPush ? "Commit and push all changes in \(name)?" : "Commit all changes in \(name)?"
+        alert.informativeText = """
+            This stages every change, including untracked files (git add -A), \
+            and commits with a generated message\(andPush ? ", then pushes the current branch" : "").
+            """
+        alert.addButton(withTitle: andPush ? "Commit & Push" : "Commit")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        return alert.runModal() == .alertFirstButtonReturn
+    }
 
     func gitActionStatus(forProjectRoot root: String?) -> GitActionStatus? {
         store.gitActionStatus(forProjectRoot: root)
@@ -419,26 +460,21 @@ class SidebarTabManager: ObservableObject {
             }
         }
 
-        /// Flags that launch the agent with permissions fully bypassed (yolo).
-        private var permissionFlags: String {
+        /// Extra flags needed to start the agent's interactive session. Agents
+        /// launch with their normal permission prompts; nothing here bypasses
+        /// approvals or sandboxing.
+        private var launchFlags: String? {
             switch self {
-            case .claude: return "--dangerously-skip-permissions"
-            case .codex: return "--dangerously-bypass-approvals-and-sandbox"
-            case .opencode: return "--auto"
-            case .grok: return "--permission-mode bypassPermissions"
-            case .devin: return "--permission-mode dangerous"
-            case .cursor: return "--yolo"
-            case .antigravity: return "--dangerously-skip-permissions"
             // Cline needs -i for its interactive TUI (bare `cline` runs a
-            // single non-interactive prompt); auto-approve is on by default
-            // but we pass it explicitly to be safe.
-            case .cline: return "-i --auto-approve true"
+            // single non-interactive prompt).
+            case .cline: return "-i"
+            case .claude, .codex, .opencode, .grok, .devin, .cursor, .antigravity: return nil
             }
         }
 
         /// The shell command to launch a fresh session of this agent.
         var launchCommand: String {
-            "\(binaryName) \(permissionFlags)"
+            [binaryName, launchFlags].compactMap { $0 }.joined(separator: " ")
         }
 
         /// The shell command to resume a prior session, or nil if resume isn't
@@ -451,20 +487,20 @@ class SidebarTabManager: ObservableObject {
             switch self {
             case .claude:
                 guard idIsSafe else { return nil }
-                return "claude --resume \(sessionId) \(permissionFlags)"
+                return "claude --resume \(sessionId)"
             case .codex:
                 guard idIsSafe else { return nil }
-                return "codex resume \(sessionId) \(permissionFlags)"
+                return "codex resume \(sessionId)"
             case .grok:
                 guard idIsSafe else { return nil }
-                return "grok --resume \(sessionId) \(permissionFlags)"
+                return "grok --resume \(sessionId)"
             case .cursor:
                 guard idIsSafe else { return nil }
-                return "cursor-agent --resume \(sessionId) \(permissionFlags)"
+                return "cursor-agent --resume \(sessionId)"
             case .devin:
                 // Devin exposes no session id in hooks, so there's nothing to
                 // validate — launch its interactive session picker instead.
-                return "devin -r \(permissionFlags)"
+                return "devin -r"
             case .opencode, .antigravity, .cline:
                 // No hook-provided session id / resume support yet.
                 return nil
@@ -545,6 +581,22 @@ class SidebarTabManager: ObservableObject {
 
     func createNewTab() {
         NSApp.sendAction(#selector(TerminalController.newTab(_:)), to: nil, from: nil)
+    }
+
+    /// Select a tab and type `text` at its prompt without pressing Enter, so
+    /// the user can read it before running it.
+    func typeAtPrompt(_ text: String, in tab: TabItem) {
+        guard let controller = window(for: tab)?.windowController as? BaseTerminalController,
+              let surface = controller.surfaceTree.first(where: { $0.id == tab.surfaceId })
+                ?? controller.focusedSurface else { return }
+        // The text comes from IPC-settable metadata; drop control characters
+        // so an embedded newline or escape sequence cannot run anything.
+        let safe = String(String.UnicodeScalarView(
+            text.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        ))
+        guard !safe.isEmpty else { return }
+        selectTab(tab)
+        surface.sendText(safe)
     }
 
     func setTabColor(_ color: TerminalTabColor, for tab: TabItem) {

@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-SOCKET_PATH="${GHOSTTY_SOCKET:-/tmp/ghostty-$(id -u).sock}"
+SOCKET_PATH="${GHOSTTY_SOCKET:-$HOME/Library/Application Support/com.shakib.ghostty/ghostty.sock}"
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -28,7 +28,7 @@ Commands:
 
 Environment:
   GHOSTTY_SOCKET   Override the IPC socket path
-                   (default: /tmp/ghostty-<uid>.sock)
+                   (default: $HOME/Library/Application Support/com.shakib.ghostty/ghostty.sock)
   GHOSTTY_TAB_ID   If set, targets that specific tab
 
 Options:

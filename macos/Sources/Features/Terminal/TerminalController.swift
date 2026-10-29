@@ -781,13 +781,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             ? sidebarTabManager?.tabAdjacentInDisplayOrder(to: window)
             : nil
 
-        // With pane-keeper, undo must not retain live SurfaceViews: that keeps
-        // the keeper alive (kill runs from surface free) and leaves Metal
-        // layers in WindowServer after AppKit has already forgotten the tab.
-        // Without pane-keeper, keep the existing undo-restore behavior.
-        if ghostty.config.paneKeeper {
-            releaseSurfacesImmediately()
-        } else if let undoManager, let undoState {
+        // Undo keeps the live surfaces for the undo timeout. Without undo,
+        // free them now rather than waiting on ARC of sidebar rows.
+        if let undoManager, let undoState {
             undoManager.setActionName("Close Tab")
             undoManager.registerUndo(
                 withTarget: ghostty,
@@ -921,22 +917,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         cancelPendingInitialPresentation()
 
-        // Same rule as closeTabImmediately: pane-keeper + live-surface undo
-        // leaks keepers and WindowServer layers. Skip that undo and free now.
-        if ghostty.config.paneKeeper {
-            if let tabGroup = window.tabGroup, tabGroup.windows.count > 1 {
-                for tabWindow in tabGroup.windows {
-                    if let controller = tabWindow.windowController as? TerminalController {
-                        controller.cancelPendingInitialPresentation()
-                        controller.releaseSurfacesImmediately()
-                    }
-                }
-            } else {
-                releaseSurfacesImmediately()
-            }
-        } else {
-            registerUndoForCloseWindow()
-        }
+        registerUndoForCloseWindow()
 
         if let tabGroup = window.tabGroup, tabGroup.windows.count > 1 {
             tabGroup.windows.forEach { window in
@@ -945,14 +926,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 // process them on later ticks so we can't just disable undo registration.
                 if let controller = window.windowController as? TerminalController {
                     controller.cancelPendingInitialPresentation()
-                    if !ghostty.config.paneKeeper {
-                        controller.surfaceTree = .init()
-                    }
+                    controller.surfaceTree = .init()
                 }
 
                 window.close()
             }
         } else {
+            // Same as the tab group case: undo holds the surfaces now, so
+            // windowWillClose must not release them.
+            surfaceTree = .init()
             window.close()
         }
 

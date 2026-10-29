@@ -1044,8 +1044,14 @@ final class SidebarStore {
     /// Project root marker files, in priority order.
     private static let projectRootMarkers = [
         ".git", "package.json", "Cargo.toml", "go.mod",
-        "pyproject.toml", "Gemfile", "pom.xml", "build.gradle",
+        "pyproject.toml", "Gemfile", "pom.xml", "pubspec.yaml",
+        "settings.gradle", "settings.gradle.kts", "build.gradle", "build.gradle.kts",
     ]
+
+    /// Gradle files that also appear in every module of a multi-module build.
+    /// A directory holding one is only a project root when its parent is not
+    /// the build root, so `app/` and `core/` group under the Android project.
+    private static let gradleModuleMarkers: Set<String> = ["build.gradle", "build.gradle.kts"]
 
     private func detectProjectRoot(at pwd: String) -> String? {
         if let cached = projectRootCache[pwd] {
@@ -1067,9 +1073,15 @@ final class SidebarStore {
             if dir == home { return nil }
             for marker in projectRootMarkers {
                 let markerPath = (dir as NSString).appendingPathComponent(marker)
-                if fm.fileExists(atPath: markerPath) {
-                    return dir
+                guard fm.fileExists(atPath: markerPath) else { continue }
+                if gradleModuleMarkers.contains(marker) {
+                    let parent = (dir as NSString).deletingLastPathComponent
+                    let parentIsBuildRoot = ["settings.gradle", "settings.gradle.kts"].contains {
+                        fm.fileExists(atPath: (parent as NSString).appendingPathComponent($0))
+                    }
+                    if parentIsBuildRoot { continue }
                 }
+                return dir
             }
             dir = (dir as NSString).deletingLastPathComponent
         }

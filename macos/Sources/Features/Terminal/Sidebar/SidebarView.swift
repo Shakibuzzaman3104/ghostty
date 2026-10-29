@@ -235,13 +235,6 @@ struct SidebarView: View {
                     }
                     .padding(.vertical, 8)
                 }
-
-                HStack(spacing: 0) {
-                    SidebarSettingsMenu(tabManager: tabManager, theme: theme)
-                    Spacer()
-                }
-                .padding(.horizontal, 10)
-                .padding(.bottom, 8)
             }
         }
         .overlay(SidebarClickOverlay(
@@ -515,7 +508,7 @@ private struct ThreadRow: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .help(primaryTitle)
+                    .help(tab.lastCommand.map { "\(primaryTitle)\nLast command: \($0)" } ?? primaryTitle)
                 if let subtitle {
                     Text(subtitle)
                         .font(.system(size: 10))
@@ -604,6 +597,18 @@ private struct ThreadRow: View {
                             Image(nsImage: color.swatchImage(selected: color == tab.tabColor))
                         }
                     }
+                }
+            }
+
+            if let command = tab.lastCommand {
+                Button("Type Last Command: \(command.prefix(40))\(command.count > 40 ? "…" : "")") {
+                    tabManager.typeAtPrompt(command, in: tab)
+                }
+            }
+
+            if let resume = tab.agentResume {
+                Button("Resume \(resume.agent.displayName) Session") {
+                    tabManager.typeAtPrompt(resume.command, in: tab)
                 }
             }
 

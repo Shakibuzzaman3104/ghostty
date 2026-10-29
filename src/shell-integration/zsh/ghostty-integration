@@ -343,15 +343,6 @@ _ghostty_deferred_init() {
         fi
     "${functions[_ghostty_zle_line_init]}
 
-    # Prepend the agent shim directory (wrapper scripts that inject sidebar
-    # hooks into agent CLIs like claude). Done here — after profiles ran —
-    # so path_helper and user profiles can't reorder it away.
-    if [[ -n "$GHOSTTY_AGENT_SHIM_DIR" && -d "$GHOSTTY_AGENT_SHIM_DIR" ]]; then
-      if [[ ":$PATH:" != *":$GHOSTTY_AGENT_SHIM_DIR:"* ]]; then
-        builtin export PATH="$GHOSTTY_AGENT_SHIM_DIR:$PATH"
-      fi
-    fi
-
     # Add Ghostty binary to PATH if the path feature is enabled
     if [[ "$GHOSTTY_SHELL_FEATURES" == *"path"* ]] && [[ -n "$GHOSTTY_BIN_DIR" ]]; then
       if [[ ":$PATH:" != *":$GHOSTTY_BIN_DIR:"* ]]; then

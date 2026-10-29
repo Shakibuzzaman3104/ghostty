@@ -169,12 +169,6 @@ class AppDelegate: NSObject,
     /// or crash doesn't lose all window state (browser-like crash recovery).
     private var stateFlushTimer: Timer?
 
-    /// Whether the termination in progress should hand persistent terminals
-    /// to their keepers rather than end them. False for a machine shutdown,
-    /// restart or logout: a detached shell outlives the login session and can
-    /// hold logout up, so those end everything for real.
-    private var terminationDetaches = true
-
     /// Signals
     private var signals: [DispatchSourceSignal] = []
 
@@ -227,10 +221,6 @@ class AppDelegate: NSObject,
         // in their environment. Window restoration runs between willFinish and
         // didFinish, so the socket must be available by then.
         GhosttyIPCServer.shared.start()
-
-        // Materialize agent CLI shims (sidebar hooks with zero user setup)
-        // before any surface spawns so GHOSTTY_AGENT_SHIM_DIR is available.
-        AgentShimInstaller.install()
 
         // Detect which agent CLIs are installed so the new-tab menu shows only
         // launchable agents. Runs off-main; force past the throttle at launch.
@@ -362,10 +352,8 @@ class AppDelegate: NSObject,
         // Setup signal handlers
         setupSignals()
 
-        // Prune this app's tab metadata after restoration. Keepers are shared
-        // across app instances, so absence from this window tree does not mean
-        // a shell is orphaned. Never kill them automatically on startup; the
-        // explicit `ghostty +keepers --kill=<id>` command handles cleanup.
+        // Prune tab metadata for surfaces that did not come back after
+        // restoration.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
             var liveSurfaceIds = Set<UUID>()
             for window in NSApp.windows {
@@ -441,10 +429,6 @@ class AppDelegate: NSObject,
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // An ordinary quit hands persistent terminals to their keepers rather
-        // than ending them. Assume that until something below says otherwise.
-        terminationDetaches = true
-
         let windows = NSApplication.shared.windows
         if windows.isEmpty { return .terminateNow }
 
@@ -464,10 +448,6 @@ class AppDelegate: NSObject,
             if let why = event.attributeDescriptor(forKeyword: keyword) {
                 switch why.typeCodeValue {
                 case kAEShutDown, kAERestart, kAEReallyLogOut:
-                    // The machine going down is not a restart we'll come back
-                    // from, and a detached shell can outlive the login session
-                    // and hold logout up. Kill for real here.
-                    terminationDetaches = false
                     return .terminateNow
 
                 default:
@@ -479,19 +459,6 @@ class AppDelegate: NSObject,
         // If our app says we don't need to confirm, we can exit now.
         if !ghostty.needsConfirmQuit { return .terminateNow }
 
-        // Don't ask about terminals that aren't going anywhere. With
-        // persistent terminals on, quitting hands panes to their keepers and
-        // reopening puts them back, so "you have N terminals open, close them
-        // all?" is warning about a loss that cannot happen. Panes started
-        // before the setting was turned on have no keeper and do end, so the
-        // question is only skipped when every one of them is covered.
-        if terminationDetaches,
-           ghostty.config.paneKeeper,
-           let app = ghostty.app,
-           ghostty_app_panes_without_keeper(app) == 0 {
-            return .terminateNow
-        }
-
         return terminate()
     }
 
@@ -499,20 +466,6 @@ class AppDelegate: NSObject,
         // The window frame is written lazily while dragging. Anything still
         // waiting has to land now or the next launch reopens somewhere stale.
         LastWindowPosition.shared.flush()
-
-        // Point of no return: hand keeper-held panes over with their screens
-        // intact so the next launch can pick them straight back up. Surface
-        // teardown isn't guaranteed to run on quit — the process can simply
-        // exit — so this can't be left to it.
-        //
-        // Gated on the setting as it stands right now, not on how each pane
-        // started. Someone who turns Persistent Terminals off and quits means
-        // it: without this, panes opened while it was on would still detach
-        // and then never be reclaimed, because the next launch wouldn't go
-        // looking for them. They get killed instead.
-        if terminationDetaches, ghostty.config.paneKeeper, let app = ghostty.app {
-            ghostty_app_detach_panes(app)
-        }
 
         GhosttyIPCServer.shared.stop()
 
