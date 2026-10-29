@@ -12,6 +12,8 @@ small hooks so the daily upstream merge stays painless.
   (`.git`, `package.json`, `Cargo.toml`, `go.mod`, `pyproject.toml`,
   `Gemfile`, `pom.xml`, `pubspec.yaml`, Gradle builds) and the project's app
   icon or favicon. Config: `sidebar-fields`, `sidebar-opacity`.
+- **Open Folder…** (⇧⌘O, File menu or the + next to PROJECTS) opens a tab
+  in any folder, which then shows up as a project.
 - **Recent projects** below the open ones; click to open a tab there.
 - **Restore on relaunch**: windows and tabs come back, and closing the last
   window quits so they are saved. Nothing is typed into restored terminals;

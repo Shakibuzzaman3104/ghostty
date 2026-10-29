@@ -348,6 +348,7 @@ class AppDelegate: NSObject,
         // Setup our menu
         setupMenuImages()
         setupTabColorSubmenu()
+        setupOpenFolderMenuItem()
 
         // Setup signal handlers
         setupSignals()
@@ -1250,6 +1251,31 @@ extension AppDelegate {
     }
 
     /// Build a "Tab Color" submenu and insert it into the View menu after "Change Tab Title...".
+    /// Add File > Open Folder… (⇧⌘O) after New Tab.
+    private func setupOpenFolderMenuItem() {
+        let newTabAction = #selector(TerminalController.newTab(_:))
+        guard let fileMenu = NSApp.mainMenu?.items.lazy.compactMap(\.submenu).first(where: { menu in
+                  menu.items.contains { $0.action == newTabAction }
+              }),
+              let index = fileMenu.items.firstIndex(where: { $0.action == newTabAction }) else {
+            Self.logger.warning("menu: New Tab item not found; Open Folder not added")
+            return
+        }
+        let item = NSMenuItem(
+            title: "Open Folder…",
+            action: #selector(openFolder(_:)),
+            keyEquivalent: "O"
+        )
+        item.keyEquivalentModifierMask = [.command, .shift]
+        item.target = self
+        item.setImageIfDesired(systemSymbolName: "folder")
+        fileMenu.insertItem(item, at: index + 1)
+    }
+
+    @MainActor @objc func openFolder(_ sender: Any?) {
+        SidebarTabManager.openFolder(from: NSApp.keyWindow ?? TerminalController.all.first?.window)
+    }
+
     private func setupTabColorSubmenu() {
         guard let viewMenu = NSApp.mainMenu?.item(withTitle: "View")?.submenu else { return }
         guard let changeTabTitleItem = self.menuChangeTabTitle else { return }

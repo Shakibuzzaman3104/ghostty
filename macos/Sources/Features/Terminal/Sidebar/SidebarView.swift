@@ -1158,6 +1158,18 @@ private struct SidebarSortHeader: View {
                 .tracking(0.5)
 
             Spacer()
+
+            Button {
+                SidebarTabManager.openFolder(from: tabManager.window)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(theme.secondaryText.opacity(0.8))
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Open Folder… (⇧⌘O)")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 2)

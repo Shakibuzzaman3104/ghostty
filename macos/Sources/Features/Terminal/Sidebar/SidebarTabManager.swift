@@ -577,6 +577,43 @@ class SidebarTabManager: ObservableObject {
         )
     }
 
+    /// Ask for a folder and open a tab in it. The tab joins that folder's
+    /// project group, or starts one, like any other tab.
+    static func openFolder(from window: NSWindow?) {
+        let panel = NSOpenPanel()
+        panel.title = "Open Folder"
+        panel.prompt = "Open"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.canCreateDirectories = true
+
+        let open: (NSApplication.ModalResponse) -> Void = { response in
+            guard response == .OK else { return }
+            for url in panel.urls {
+                openTab(in: url.path, from: window)
+            }
+        }
+        if let window {
+            panel.beginSheetModal(for: window, completionHandler: open)
+        } else {
+            open(panel.runModal())
+        }
+    }
+
+    /// Open a tab with `directory` as its working directory, in `window`'s
+    /// tab group when there is one, otherwise in a new window.
+    static func openTab(in directory: String, from window: NSWindow?) {
+        guard let ghostty = (NSApp.delegate as? AppDelegate)?.ghostty else { return }
+        var config = Ghostty.SurfaceConfiguration()
+        config.workingDirectory = directory
+        if let window, window.windowController is TerminalController {
+            _ = TerminalController.newTab(ghostty, from: window, withBaseConfig: config)
+        } else {
+            _ = TerminalController.newWindow(ghostty, withBaseConfig: config)
+        }
+    }
+
     // MARK: - Tab Actions
 
     func createNewTab() {
