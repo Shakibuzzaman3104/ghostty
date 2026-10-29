@@ -315,7 +315,17 @@ class SidebarTabManager: ObservableObject {
         if let window,
            let tabGroup = window.tabGroup,
            tabGroup.windows.contains(tabWindow) {
+            // Selecting a tab only changes which window is visible; the key
+            // window, and with it the keyboard, stays on the old tab. Then a
+            // new tab inherits the old tab's directory and joins its project.
+            let visibleFrame = (tabGroup.selectedWindow ?? window).frame
             tabGroup.selectedWindow = tabWindow
+            tabWindow.makeKeyAndOrderFront(nil)
+            // Same frame guard as the reorder path: the group can adopt the
+            // newly key window's own cascade origin.
+            if tabWindow.frame != visibleFrame {
+                tabWindow.setFrame(visibleFrame, display: true)
+            }
         } else {
             tabWindow.makeKeyAndOrderFront(nil)
         }
