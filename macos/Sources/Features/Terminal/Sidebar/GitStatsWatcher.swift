@@ -261,7 +261,7 @@ private final class ProjectWatcher {
 
         guard process.terminationStatus == 0 else { return .error }
 
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let data = pipe.fileHandleForReading.readToEndSafely()
         guard let output = String(data: data, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines),
             !output.isEmpty else { return .success(nil) }

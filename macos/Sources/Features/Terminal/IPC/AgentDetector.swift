@@ -96,7 +96,7 @@ final class AgentDetector: ObservableObject {
         } catch {
             return fallback()
         }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let data = pipe.fileHandleForReading.readToEndSafely()
         proc.waitUntilExit()
 
         let path = String(data: data, encoding: .utf8) ?? ""

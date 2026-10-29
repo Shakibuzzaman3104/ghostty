@@ -102,7 +102,33 @@ class SidebarTabManager: ObservableObject {
             if t.isEmpty || t == "Ghostty" {
                 if let dir = directoryName { return dir }
             }
+            // Shell themes title tabs "user@host:~/path", which truncates to
+            // the same "user@host…" on every row. A title that only names
+            // the directory is replaced by where the tab is in its group.
+            if let range = t.range(of: #"^[^@\s]+@[^:\s]+:\s*"#, options: .regularExpression) {
+                t.removeSubrange(range)
+            }
+            if Self.isPathTitle(t), let location = locationLabel { return location }
             return t
+        }
+
+        /// The pwd relative to the project root ("app/src"), the project's
+        /// folder name at the root, or the pwd with `~` for the home folder
+        /// outside a project.
+        var locationLabel: String? {
+            guard let pwd, !pwd.isEmpty else { return nil }
+            let path = (pwd as NSString).expandingTildeInPath
+            if let projectRoot {
+                if path == projectRoot { return (projectRoot as NSString).lastPathComponent }
+                if path.hasPrefix(projectRoot + "/") {
+                    return String(path.dropFirst(projectRoot.count + 1))
+                }
+            }
+            return (path as NSString).abbreviatingWithTildeInPath
+        }
+
+        private static func isPathTitle(_ title: String) -> Bool {
+            title.hasPrefix("/") || title.hasPrefix("~") || title.hasPrefix("…/") || title.hasPrefix(".../")
         }
 
         /// The id of the display group this tab belongs to: a project root path,

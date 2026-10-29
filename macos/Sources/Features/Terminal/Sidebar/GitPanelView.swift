@@ -15,7 +15,9 @@ struct GitPanelView: View {
     @State private var branchAnchor: NSView?
     @State private var menuPresenter = BranchMenuPresenter()
 
-    private static let maxVisibleFiles = 10
+    /// Files listed before "+ N more". Kept small: the panel shares the
+    /// sidebar with the project list, which must stay usable.
+    private static let maxVisibleFiles = 4
 
     var body: some View {
         if model.repoRoot != nil {
@@ -174,7 +176,7 @@ struct GitPanelView: View {
                             ForEach(model.changes) { change in fileRow(change) }
                         }
                     }
-                    .frame(maxHeight: 200)
+                    .frame(maxHeight: 160)
                 } else {
                     ForEach(model.changes.prefix(Self.maxVisibleFiles)) { change in
                         fileRow(change)
@@ -306,7 +308,7 @@ struct GitPanelView: View {
         process.standardError = FileHandle.nullDevice
         process.standardInput = FileHandle.nullDevice
         do { try process.run() } catch { return ResolvedEditor(command: "", appPath: "") }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
+        let data = out.fileHandleForReading.readToEndSafely()
         process.waitUntilExit()
         guard let text = String(data: data, encoding: .utf8) else {
             return ResolvedEditor(command: "", appPath: "")
@@ -492,10 +494,13 @@ private struct FileRow: View {
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundColor(statusColor)
                     .frame(width: 11)
-                Text(change.fileName)
-                    .font(.system(size: 11))
+                // The folder, dimmed, tells apart files that share a name.
+                (Text(change.fileName)
                     .foregroundColor(theme.foreground.opacity(hover && openable ? 1.0 : 0.85))
                     .underline(hover && openable)
+                 + Text(change.directory.map { "  \($0)" } ?? "")
+                    .foregroundColor(theme.secondaryText.opacity(0.7)))
+                    .font(.system(size: 11))
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 0)

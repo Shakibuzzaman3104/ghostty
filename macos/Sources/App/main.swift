@@ -2,6 +2,16 @@ import AppKit
 import Cocoa
 import GhosttyKit
 
+// Launched from a shell inside another Ghostty (e.g. `open Ghostty.app`), we
+// inherit that app's GHOSTTY_RESOURCES_DIR, and every shell would load its
+// shell integration instead of ours. Drop a value from another app bundle;
+// a hand-set one (development) is left alone.
+if let inherited = ProcessInfo.processInfo.environment["GHOSTTY_RESOURCES_DIR"],
+   inherited.contains(".app/Contents/Resources"),
+   !inherited.hasPrefix(Bundle.main.bundlePath + "/") {
+    unsetenv("GHOSTTY_RESOURCES_DIR")
+}
+
 // Initialize Ghostty global state. We do this once right away because the
 // CLI APIs require it and it lets us ensure it is done immediately for the
 // rest of the app.

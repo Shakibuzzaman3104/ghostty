@@ -386,9 +386,17 @@ final class GitPanelModel: ObservableObject {
                     return
                 }
 
-                // Read before waiting so large output can't deadlock the pipe.
-                let outData = stdout.fileHandleForReading.readDataToEndOfFile()
-                let errData = stderr.fileHandleForReading.readDataToEndOfFile()
+                // Read before waiting so large output can't deadlock the pipe,
+                // and drain stderr alongside stdout: git blocks once either
+                // pipe's buffer fills.
+                var errData = Data()
+                let errDone = DispatchSemaphore(value: 0)
+                DispatchQueue.global(qos: .userInitiated).async {
+                    errData = stderr.fileHandleForReading.readToEndSafely()
+                    errDone.signal()
+                }
+                let outData = stdout.fileHandleForReading.readToEndSafely()
+                errDone.wait()
                 process.waitUntilExit()
 
                 continuation.resume(returning: GitResult(

@@ -139,7 +139,13 @@ final class TabMetadataStore: ObservableObject {
         ).first else { return nil }
         let bundleId = Bundle.main.bundleIdentifier ?? "com.mitchellh.ghostty"
         let dir = appSupport.appendingPathComponent(bundleId)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Owner-only: the file holds the last command of every tab, which
+        // can carry tokens or passwords.
+        try? FileManager.default.createDirectory(
+            at: dir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
         return dir.appendingPathComponent("tab-metadata.json")
     }
 
@@ -181,5 +187,6 @@ final class TabMetadataStore: ObservableObject {
         let persisted = PersistedMetadata(entries: filtered)
         guard let data = try? JSONEncoder().encode(persisted) else { return }
         try? data.write(to: url, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 }

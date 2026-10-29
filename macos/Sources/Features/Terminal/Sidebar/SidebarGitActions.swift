@@ -389,7 +389,7 @@ enum SidebarGitActions {
         }
 
         func consume(_ handle: FileHandle, intoStdout: Bool) {
-            let chunk = handle.availableData
+            let chunk = handle.availableDataSafely()
             guard !chunk.isEmpty else {
                 handle.readabilityHandler = nil
                 return
@@ -398,7 +398,7 @@ enum SidebarGitActions {
         }
 
         func consumeToEnd(_ handle: FileHandle, intoStdout: Bool) {
-            let chunk = handle.readDataToEndOfFile()
+            let chunk = handle.readToEndSafely()
             if !chunk.isEmpty {
                 append(chunk, intoStdout: intoStdout)
             }

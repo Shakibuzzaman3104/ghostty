@@ -72,7 +72,7 @@ enum ConfigReference {
                 return []
             }
             // Drain before waiting: the output is larger than a pipe buffer.
-            let data = output.fileHandleForReading.readDataToEndOfFile()
+            let data = output.fileHandleForReading.readToEndSafely()
             process.waitUntilExit()
             guard process.terminationStatus == 0 else { return [] }
             return parse(String(bytes: data, encoding: .utf8) ?? "")
