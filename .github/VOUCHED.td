@@ -81,12 +81,14 @@ brentschroeter
 brianc442
 by-nelson
 c0x0o
+cammeresi
 carldaws
 carlvillads
 cespare
 charliie-dev
 chernetskyi
 chronologos
+clavinjune
 clemg
 clinta
 cmwetherell
