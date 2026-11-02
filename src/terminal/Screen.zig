@@ -1125,6 +1125,7 @@ pub fn cursorDownScroll(self: *Screen) !void {
         if (self.cursor.style.bgCell()) |blank_cell| {
             const cell_current: [*]pagepkg.Cell = @ptrCast(self.cursor.page_cell);
             const cells = cell_current - self.cursor.x;
+            self.cursor.page_row.blank = false;
             @memset(cells[0..self.pages.cols], blank_cell);
         }
     }
@@ -1225,6 +1226,7 @@ pub fn cursorScrollAbove(self: *Screen) !void {
         if (self.cursor.style.bgCell()) |blank_cell| {
             const cell_current: [*]pagepkg.Cell = @ptrCast(self.cursor.page_cell);
             const cells = cell_current - self.cursor.x;
+            self.cursor.page_row.blank = false;
             @memset(cells[0..self.pages.cols], blank_cell);
         }
     }
@@ -1476,6 +1478,7 @@ fn cursorScrollRegionUpSlow(self: *Screen, limit: usize) !void {
     const blank = self.blankCell();
     if (!blank.isZero()) {
         const cells: [*]Cell = @ptrCast(self.cursor.page_cell);
+        self.cursor.page_row.blank = false;
         @memset((cells - self.cursor.x)[0..self.pages.cols], blank);
     }
 }
@@ -1831,12 +1834,19 @@ pub inline fn eraseActive(
     if (comptime build_options.kitty_graphics) self.kitty_images.markDirty();
 }
 
-// Clear the region specified by tl and bl, inclusive. Cleared cells are
-// colored with the current style background color. This will clear all
-// cells in the rows.
-//
-// If protected is true, the protected flag will be respected and only
-// unprotected cells will be cleared. Otherwise, all cells will be cleared.
+/// Clear the rows from tl to bl, inclusive. If bl is null, clear to the
+/// end of tl's region. Cleared cells take the current background color,
+/// and row metadata such as wrap state is reset.
+///
+/// If protected is true, protected cells and row metadata are kept.
+///
+/// ```zig
+/// // Clear the whole active area, like `ESC [ 2 J`.
+/// screen.clearRows(.{ .active = .{} }, null, false);
+/// ```
+///
+/// Rows that are already empty (see `Row.blank`) are skipped and not
+/// marked dirty, which makes clearing a mostly empty screen cheap.
 pub fn clearRows(
     self: *Screen,
     tl: point.Point,
@@ -1845,11 +1855,31 @@ pub fn clearRows(
 ) void {
     defer self.assertIntegrity();
 
+    // If the blank cell is the zero cell, a row already marked blank
+    // already holds exactly what the clear would write.
+    const blank_zero = self.blankCell().isZero();
+
     var it = self.pages.pageIterator(.right_down, tl, bl);
     while (it.next()) |chunk| {
         const page = chunk.node.page();
         for (chunk.rows()) |*row| {
             const cells_offset = row.cells;
+
+            // Already empty: only reset metadata. The cells don't
+            // change, so the dirty state is kept as is.
+            if (row.blank and blank_zero) {
+                // Most rows are empty when shells and `clear` redraw.
+                @branchHint(.likely);
+
+                // A protected clear keeps metadata, so it has nothing to do.
+                if (!protected) row.* = .{
+                    .cells = cells_offset,
+                    .blank = true,
+                    .dirty = row.dirty,
+                };
+                continue;
+            }
+
             const cells = page.getCells(row);
 
             // Clear all cells
@@ -1858,12 +1888,17 @@ pub fn clearRows(
                 // We need to preserve other row attributes since we only
                 // cleared unprotected cells.
                 row.cells = cells_offset;
+                row.dirty = true;
             } else {
                 self.clearCells(page, row, cells);
-                row.* = .{ .cells = cells_offset };
+                // Reset the metadata but keep the blank flag that
+                // clearCells just set.
+                row.* = .{
+                    .cells = cells_offset,
+                    .blank = row.blank,
+                    .dirty = true,
+                };
             }
-
-            row.dirty = true;
         }
     }
 }
@@ -1871,6 +1906,10 @@ pub fn clearRows(
 /// Clear the cells with the blank cell.
 ///
 /// This takes care to handle cleaning up graphemes and styles.
+///
+/// It also updates `Row.blank`. A full-row clear with a zero blank cell
+/// sets it, a colored blank cell clears it, and a partial clear with a
+/// zero blank cell leaves it unchanged.
 pub fn clearCells(
     self: *Screen,
     page: *Page,
@@ -1967,7 +2006,15 @@ pub fn clearCells(
         }
     }
 
-    @memset(cells, self.blankCell());
+    const blank = self.blankCell();
+    @memset(cells, blank);
+
+    // Update Row.blank as described in the doc comment above.
+    if (cells.len == page.size.cols) {
+        row.blank = blank.isZero();
+    } else if (!blank.isZero()) {
+        row.blank = false;
+    }
 }
 
 /// Clear cells but only if they are not protected.
@@ -2444,19 +2491,32 @@ pub fn setAttribute(
     self: *Screen,
     attr: sgr.Attribute,
 ) PageList.IncreaseCapacityError!void {
-    // If we fail to set our style for any reason, we should revert
-    // back to the old style. If we fail to do that, we revert back to
-    // the default style.
     const old_style = self.cursor.style;
-    errdefer {
-        self.cursor.style = old_style;
-        self.manualStyleUpdate() catch |err| {
-            log.warn("setAttribute error restoring old style after failure err={}", .{err});
-            self.cursor.style = .{};
-            self.manualStyleUpdate() catch unreachable;
-        };
-    }
+    self.applyAttribute(attr);
+    try self.commitStyle(old_style);
+}
 
+/// Set all the style attributes of one SGR sequence for the current
+/// cursor. The resulting style is interned once, after every attribute
+/// is applied, so a sequence such as `CSI 0;1;31 m` costs one style
+/// update rather than three.
+///
+/// On failure the cursor style reverts to what it was before the
+/// sequence, as with `setAttribute`.
+pub fn setAttributes(
+    self: *Screen,
+    parser: sgr.Parser,
+) PageList.IncreaseCapacityError!void {
+    const old_style = self.cursor.style;
+    var p = parser;
+    while (p.next()) |attr| self.applyAttribute(attr);
+    try self.commitStyle(old_style);
+}
+
+/// Apply a style attribute to the cursor style without updating the
+/// cursor style ID. `commitStyle` must follow before anything reads
+/// the cursor style ID.
+fn applyAttribute(self: *Screen, attr: sgr.Attribute) void {
     switch (attr) {
         .unset => {
             self.cursor.style = .{};
@@ -2592,15 +2652,47 @@ pub fn setAttribute(
             self.cursor.style.bg_color = .{ .palette = idx };
         },
 
-        .unknown => return,
+        // Unknown attributes are ignored. They are common enough in real
+        // output (a bare `38`, font selection `10`) that logging each one
+        // costs more than the sequence itself.
+        .unknown => {},
     }
+}
 
-    // If the attribute didn't change our style then we can skip the
+const commitStyle_tw = tripwire.module(enum {
+    manual_style_update,
+}, commitStyle);
+
+/// Update the cursor style ID to match the cursor style after one or
+/// more `applyAttribute` calls. `old_style` is the cursor style from
+/// before those calls.
+///
+/// If the style can't be set due to any internal errors (memory-related),
+/// then this reverts the cursor style to `old_style` (or the default
+/// style if even that fails) and returns an error.
+fn commitStyle(
+    self: *Screen,
+    old_style: style.Style,
+) PageList.IncreaseCapacityError!void {
+    // If the attributes didn't change our style then we can skip the
     // style update entirely: our current style ID is already correct.
     // This is a common case in the wild where programs re-assert the
     // same style repeatedly (e.g. per span or per line).
     if (self.cursor.style.eql(old_style)) return;
 
+    // If we fail to set our style for any reason, we should revert
+    // back to the old style. If we fail to do that, we revert back to
+    // the default style.
+    errdefer {
+        self.cursor.style = old_style;
+        self.manualStyleUpdate() catch |err| {
+            log.warn("commitStyle error restoring old style after failure err={}", .{err});
+            self.cursor.style = .{};
+            self.manualStyleUpdate() catch unreachable;
+        };
+    }
+
+    try commitStyle_tw.check(.manual_style_update);
     try self.manualStyleUpdate();
 }
 
@@ -3982,6 +4074,7 @@ pub fn testWriteString(self: *Screen, text: []const u8) !void {
         }
 
         assert(width == 1 or width == 2);
+        self.cursor.page_row.blank = false;
         switch (width) {
             1 => {
                 self.cursor.page_cell.* = .{
@@ -4021,6 +4114,7 @@ pub fn testWriteString(self: *Screen, text: []const u8) !void {
                     try self.cursorDownOrScroll();
                     self.cursorHorizontalAbsolute(0);
                     self.cursor.page_row.wrap_continuation = true;
+                    self.cursor.page_row.blank = false;
                 }
 
                 // Write our wide char
@@ -4633,6 +4727,82 @@ test "Screen style basics" {
     try testing.expect(s.cursor.style_id != 0);
     try testing.expectEqual(@as(usize, 1), page.styles.count());
     try testing.expect(s.cursor.style.flags.italic);
+}
+
+test "Screen setAttributes applies several attributes with one style" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var s = try Screen.init(io, alloc, .{ .cols = 80, .rows = 24, .max_scrollback_bytes = 1000 });
+    defer s.deinit();
+    const page = s.cursor.page_pin.node.page();
+
+    // CSI 1;3;38;5;100 m
+    try s.setAttributes(.{ .params = &.{ 1, 3, 38, 5, 100 } });
+    try testing.expect(s.cursor.style_id != style.default_id);
+    try testing.expectEqual(@as(usize, 1), page.styles.count());
+    const interned = page.styles.get(page.memory, s.cursor.style_id);
+    try testing.expect(interned.eql(s.cursor.style));
+    try testing.expect(interned.flags.bold);
+    try testing.expect(interned.flags.italic);
+    try testing.expectEqual(style.Style.Color{ .palette = 100 }, interned.fg_color);
+
+    // A sequence that ends at the committed style keeps the same ID:
+    // CSI 0;1;3;38;5;100 m
+    const id = s.cursor.style_id;
+    try s.setAttributes(.{ .params = &.{ 0, 1, 3, 38, 5, 100 } });
+    try testing.expectEqual(id, s.cursor.style_id);
+    try testing.expectEqual(@as(usize, 1), page.styles.count());
+
+    // A sequence that ends at the default style releases the interned
+    // style: CSI 1;0 m
+    try s.setAttributes(.{ .params = &.{ 1, 0 } });
+    try testing.expectEqual(style.default_id, s.cursor.style_id);
+    try testing.expectEqual(@as(usize, 0), page.styles.count());
+
+    // An empty sequence (CSI m) is a reset.
+    try s.setAttribute(.{ .bold = {} });
+    try s.setAttributes(.{ .params = &.{} });
+    try testing.expectEqual(style.default_id, s.cursor.style_id);
+    try testing.expectEqual(@as(usize, 0), page.styles.count());
+}
+
+test "Screen setAttributes failure restores the previous style" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+    const tw = commitStyle_tw;
+    defer tw.end(.reset) catch unreachable;
+
+    var s = try Screen.init(io, alloc, .{ .cols = 80, .rows = 24, .max_scrollback_bytes = 1000 });
+    defer s.deinit();
+    const page = s.cursor.page_pin.node.page();
+
+    try s.setAttribute(.{ .bold = {} });
+    const old_style = s.cursor.style;
+    const old_id = s.cursor.style_id;
+    try testing.expectEqual(@as(usize, 1), page.styles.count());
+
+    // Fail interning the style of a sequence with several attributes:
+    // CSI 3;38;2;1;2;3 m
+    tw.errorAlways(.manual_style_update, error.OutOfMemory);
+    try testing.expectError(error.OutOfMemory, s.setAttributes(.{
+        .params = &.{ 3, 38, 2, 1, 2, 3 },
+    }));
+    try tw.end(.reset);
+
+    // The style from before the sequence is back, and still interned.
+    try testing.expect(s.cursor.style.eql(old_style));
+    try testing.expectEqual(old_id, s.cursor.style_id);
+    try testing.expectEqual(@as(usize, 1), page.styles.count());
+    try testing.expect(page.styles.get(page.memory, s.cursor.style_id).eql(old_style));
+
+    // And the next sequence works normally.
+    try s.setAttributes(.{ .params = &.{3} });
+    try testing.expect(s.cursor.style.flags.bold);
+    try testing.expect(s.cursor.style.flags.italic);
+    try testing.expect(page.styles.get(page.memory, s.cursor.style_id).eql(s.cursor.style));
 }
 
 test "Screen style reset to default" {
