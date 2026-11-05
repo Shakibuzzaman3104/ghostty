@@ -575,9 +575,10 @@ typedef enum GHOSTTY_ENUM_TYPED {
 /**
  * Where ghostty_terminal_vt_write_until() stopped, and why.
  *
- * Initialize this struct with GHOSTTY_INIT_SIZED(). The call resets every
- * field except `size` before it writes the result, so you can reuse one
- * struct across calls.
+ * This is a sized struct. Initialize it with GHOSTTY_INIT_SIZED() before
+ * the first call. See @ref sized_sec. Each call resets every field except
+ * `size` before it writes the result, so you can reuse one struct across
+ * calls.
  *
  * Fields that don't apply to a stop are zero. Zero is also a valid value
  * for `kind`, `introducer` and `end`, so always check `reached` first to
@@ -675,11 +676,8 @@ typedef struct {
  * Compressing scrollback lowers the resident figure but not the virtual
  * one, because each page's space stays reserved for decompression.
  *
- * This is a sized struct. Set `size` before the call, most easily with
- * GHOSTTY_INIT_SIZED(). Later versions of libghostty-vt may add fields to
- * the end of this struct, and the size tells the library which version
- * your program was compiled against. This lets older programs keep working
- * with newer versions of the library.
+ * This is a sized struct. Initialize it with GHOSTTY_INIT_SIZED() before
+ * passing it to ghostty_terminal_get(). See @ref sized_sec.
  *
  * Each screen has its own set of fields, named with a `primary_` or
  * `alternate_` prefix. The primary screen holds shell output and all of
@@ -993,7 +991,11 @@ typedef enum GHOSTTY_ENUM_TYPED {
 /**
  * The reply to a clipboard write request.
  *
- * This is a sized struct; set `size` to `sizeof(GhosttyClipboardWriteReply)`.
+ * This is a sized struct. Initialize it with GHOSTTY_INIT_SIZED(), then set
+ * the fields you need. See @ref sized_sec. If `size` is not valid, the
+ * library ignores the rest of the reply and answers as if you had replied
+ * with GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED.
+ *
  * The reply is borrowed only for the duration of the reply call and may be
  * freed as soon as it returns.
  *
@@ -1151,7 +1153,11 @@ typedef enum GHOSTTY_ENUM_TYPED {
 /**
  * The reply to a clipboard read request.
  *
- * This is a sized struct; set `size` to `sizeof(GhosttyClipboardReadReply)`.
+ * This is a sized struct. Initialize it with GHOSTTY_INIT_SIZED(), then set
+ * the fields you need. See @ref sized_sec. If `size` is not valid, the
+ * library ignores the rest of the reply and answers as if you had replied
+ * with GHOSTTY_CLIPBOARD_READ_RESULT_UNSUPPORTED.
+ *
  * All arrays and the strings they point to are borrowed only for the
  * duration of the reply call and may be freed as soon as it returns.
  *
@@ -1898,6 +1904,11 @@ typedef void (*GhosttyTerminalResizeWindowFn)(
  * query. Return true and fill *out_scheme with the current color scheme,
  * or return false to silently ignore the query.
  *
+ * The library sets *out_scheme to GHOSTTY_COLOR_SCHEME_LIGHT (zero)
+ * before the call, so returning true without writing it reports light.
+ * If the callback writes a value that isn't a GhosttyColorScheme, the
+ * library ignores the query, the same as if the callback returned false.
+ *
  * @param terminal The terminal handle
  * @param userdata The userdata pointer set via GHOSTTY_TERMINAL_OPT_USERDATA
  * @param[out] out_scheme Pointer to store the current color scheme
@@ -1918,6 +1929,30 @@ typedef bool (*GhosttyTerminalColorSchemeFn)(GhosttyTerminal terminal,
  *
  * The terminal uses whichever sub-struct (primary, secondary, tertiary)
  * matches the request type, but all three should be filled for simplicity.
+ *
+ * The library zeroes *out_attrs before the call, so you only need to set
+ * the fields you want to report. Every field you leave alone is reported
+ * as zero. This callback reports a VT220 with color and clipboard
+ * support, and leaves the tertiary unit ID at zero:
+ *
+ * @code
+ * static bool on_device_attributes(GhosttyTerminal terminal,
+ *                                  void* userdata,
+ *                                  GhosttyDeviceAttributes* out_attrs) {
+ *   out_attrs->primary.conformance_level = GHOSTTY_DA_CONFORMANCE_VT220;
+ *   out_attrs->primary.features[0] = GHOSTTY_DA_FEATURE_ANSI_COLOR;
+ *   out_attrs->primary.features[1] = GHOSTTY_DA_FEATURE_CLIPBOARD;
+ *   out_attrs->primary.num_features = 2;
+ *   out_attrs->secondary.device_type = GHOSTTY_DA_DEVICE_TYPE_VT220;
+ *   return true;
+ * }
+ * @endcode
+ *
+ * GhosttyDeviceAttributes is frozen. If a later version of libghostty-vt
+ * needs more fields, it adds a new callback typedef and a new option
+ * key, and keeps calling this callback with GhosttyDeviceAttributes
+ * forever. A callback written against this header keeps working with
+ * every later version of the library.
  *
  * @param terminal The terminal handle
  * @param userdata The userdata pointer set via GHOSTTY_TERMINAL_OPT_USERDATA
@@ -1954,6 +1989,29 @@ typedef GhosttyString (*GhosttyTerminalEnquiryFn)(GhosttyTerminal terminal,
  * input enables in-band size reports (mode 2048).
  * Return true and fill *out_size with the current terminal geometry,
  * or return false to suppress the report.
+ *
+ * The library zeroes *out_size before the call, so any field you don't
+ * write reads as zero. A typical callback copies the geometry from your
+ * own window state, passed in through GHOSTTY_TERMINAL_OPT_USERDATA:
+ *
+ * @code
+ * static bool on_size(GhosttyTerminal terminal,
+ *                     void* userdata,
+ *                     GhosttySizeReportSize* out_size) {
+ *   const MyWindow* window = userdata;
+ *   out_size->rows = window->rows;
+ *   out_size->columns = window->columns;
+ *   out_size->cell_width = window->cell_width;
+ *   out_size->cell_height = window->cell_height;
+ *   return true;
+ * }
+ * @endcode
+ *
+ * GhosttySizeReportSize is frozen. If a later version of libghostty-vt
+ * needs more fields, it adds a new callback typedef and a new option
+ * key, and keeps calling this callback with GhosttySizeReportSize
+ * forever. A callback written against this header keeps working with
+ * every later version of the library.
  *
  * @param terminal The terminal handle
  * @param userdata The userdata pointer set via GHOSTTY_TERMINAL_OPT_USERDATA
@@ -3307,10 +3365,13 @@ GHOSTTY_API GhosttyResult ghostty_terminal_resize(GhosttyTerminal terminal,
  * ghostty_terminal_vt_write_until() on the same terminal
  * (no reentrancy).
  *
- * @param terminal The terminal handle (may be NULL, in which case this is a no-op)
+ * @param terminal The terminal handle, must not be NULL
  * @param option The option to set
  * @param value Pointer to the value to set (type depends on the option),
  *              or NULL to clear the option
+ * @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if `terminal`
+ *         is NULL, or GHOSTTY_UNSUPPORTED if `option` is not known to this
+ *         version of the library
  *
  * @ingroup terminal
  */
@@ -3650,8 +3711,10 @@ GHOSTTY_API GhosttyResult ghostty_terminal_compress(
  * @param terminal The terminal handle (may be NULL)
  * @param data The type of data to extract
  * @param out Pointer to store the extracted data (type depends on data parameter)
- * @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if the terminal
- *         is NULL or the data type is invalid
+ * @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if the terminal is
+ *         NULL or `data` is GHOSTTY_TERMINAL_DATA_INVALID, or
+ *         GHOSTTY_UNSUPPORTED if `data` is not known to this version of the
+ *         library
  *
  * @ingroup terminal
  */
@@ -3682,7 +3745,9 @@ GHOSTTY_API GhosttyResult ghostty_terminal_get(GhosttyTerminal terminal,
  *               documented output type)
  * @param[out] out_written On return, receives the number of values
  *             successfully written (may be NULL)
- * @return GHOSTTY_SUCCESS if all queries succeed
+ * @return GHOSTTY_SUCCESS if every key succeeds. Otherwise the result of the
+ *         first key that failed, for example GHOSTTY_UNSUPPORTED for a key
+ *         that is not known to this version of the library.
  *
  * @ingroup terminal
  */

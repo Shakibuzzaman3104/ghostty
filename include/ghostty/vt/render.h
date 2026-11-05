@@ -988,9 +988,8 @@ typedef enum GHOSTTY_ENUM_TYPED {
 /**
  * Row-local selection range.
  *
- * This struct uses the sized-struct ABI pattern. Initialize with
- * GHOSTTY_INIT_SIZED(GhosttyRenderStateRowSelection) before querying
- * GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION.
+ * This is a sized struct. Initialize it with GHOSTTY_INIT_SIZED() before
+ * querying GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION. See @ref sized_sec.
  *
  * Querying GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION returns GHOSTTY_NO_VALUE
  * if the current row does not intersect the current selection.
@@ -1011,9 +1010,8 @@ typedef struct {
 /**
  * Render-state cursor information.
  *
- * This struct uses the sized-struct ABI pattern. Initialize with
- * GHOSTTY_INIT_SIZED(GhosttyRenderStateCursor) before querying
- * GHOSTTY_RENDER_STATE_DATA_CURSOR.
+ * This is a sized struct. Initialize it with GHOSTTY_INIT_SIZED() before
+ * querying GHOSTTY_RENDER_STATE_DATA_CURSOR. See @ref sized_sec.
  *
  * When viewport_has_value is false, viewport_x, viewport_y, and wide_tail
  * contain undefined data and must not be read.
@@ -1052,9 +1050,8 @@ typedef struct {
 /**
  * Render-state color information.
  *
- * This struct uses the sized-struct ABI pattern. Initialize with
- * GHOSTTY_INIT_SIZED(GhosttyRenderStateColors) before querying
- * GHOSTTY_RENDER_STATE_DATA_COLORS.
+ * This is a sized struct. Initialize it with GHOSTTY_INIT_SIZED() before
+ * querying GHOSTTY_RENDER_STATE_DATA_COLORS. See @ref sized_sec.
  *
  * Example:
  * @code
@@ -1212,8 +1209,9 @@ GHOSTTY_API GhosttyResult ghostty_render_state_clean(GhosttyRenderState state);
  * @param data The data kind to query
  * @param[out] out Pointer to receive the queried value
  * @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if `state` or
- *         `out` is NULL, `data` is not a recognized enum value, or a sized
- *         output struct is smaller than `sizeof(size_t)`
+ *         `out` is NULL or a sized output struct is smaller than
+ *         `sizeof(size_t)`, or GHOSTTY_UNSUPPORTED if `data` is not known to
+ *         this version of the library
  *
  * @ingroup render
  */
@@ -1238,7 +1236,9 @@ GHOSTTY_API GhosttyResult ghostty_render_state_get(GhosttyRenderState state,
  *               documented output type)
  * @param[out] out_written On return, receives the number of values
  *             successfully written (may be NULL)
- * @return GHOSTTY_SUCCESS if all queries succeed
+ * @return GHOSTTY_SUCCESS if every key succeeds. Otherwise the result of the
+ *         first key that failed, for example GHOSTTY_UNSUPPORTED for a key
+ *         that is not known to this version of the library.
  *
  * @ingroup render
  */
@@ -1260,7 +1260,8 @@ GHOSTTY_API GhosttyResult ghostty_render_state_get_multi(
  * @param[in] value Pointer to the value to set (NULL returns
  *            GHOSTTY_INVALID_VALUE)
  * @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if `state` or
- *         `value` is NULL
+ *         `value` is NULL or out of range, or GHOSTTY_UNSUPPORTED
+ *         if `option` is not known to this version of the library
  *
  * @ingroup render
  */
@@ -1352,8 +1353,10 @@ GHOSTTY_API bool ghostty_render_state_row_iterator_next_dirty(
  * @param iterator The iterator handle to query (NULL returns GHOSTTY_INVALID_VALUE)
  * @param data The data kind to query
  * @param[out] out Pointer to receive the queried value
- * @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if
- *         `iterator` is NULL or the iterator is not positioned on a row
+ * @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if `iterator` is
+ *         NULL or the iterator is not positioned on a row, or
+ *         GHOSTTY_UNSUPPORTED if `data` is not known to this version of the
+ *         library
  *
  * @ingroup render
  */
@@ -1379,7 +1382,9 @@ GHOSTTY_API GhosttyResult ghostty_render_state_row_get(
  *               documented output type)
  * @param[out] out_written On return, receives the number of values
  *             successfully written (may be NULL)
- * @return GHOSTTY_SUCCESS if all queries succeed
+ * @return GHOSTTY_SUCCESS if every key succeeds. Otherwise the result of the
+ *         first key that failed, for example GHOSTTY_UNSUPPORTED for a key
+ *         that is not known to this version of the library.
  *
  * @ingroup render
  */
@@ -1403,8 +1408,10 @@ GHOSTTY_API GhosttyResult ghostty_render_state_row_get_multi(
  * @param option The option to set
  * @param[in] value Pointer to the value to set (NULL returns
  *            GHOSTTY_INVALID_VALUE)
- * @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if
- *         `iterator` is NULL or the iterator is not positioned on a row
+ * @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if `iterator` is
+ *         NULL or the iterator is not positioned on a row, or
+ *         GHOSTTY_UNSUPPORTED if `option` is not known to this version of the
+ *         library
  *
  * @ingroup render
  */
@@ -1549,8 +1556,9 @@ GHOSTTY_API GhosttyResult ghostty_render_state_row_cells_select(
  * @param cells The row cells handle to query (NULL returns GHOSTTY_INVALID_VALUE)
  * @param data The data kind to query
  * @param[out] out Pointer to receive the queried value
- * @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if
- *         `cells` is NULL or the iterator is not positioned on a cell
+ * @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if `cells` is NULL
+ *         or the iterator is not positioned on a cell, or GHOSTTY_UNSUPPORTED
+ *         if `data` is not known to this version of the library
  *
  * @ingroup render
  */
@@ -1576,7 +1584,9 @@ GHOSTTY_API GhosttyResult ghostty_render_state_row_cells_get(
  *               documented output type)
  * @param[out] out_written On return, receives the number of values
  *             successfully written (may be NULL)
- * @return GHOSTTY_SUCCESS if all queries succeed
+ * @return GHOSTTY_SUCCESS if every key succeeds. Otherwise the result of the
+ *         first key that failed, for example GHOSTTY_UNSUPPORTED for a key
+ *         that is not known to this version of the library.
  *
  * @ingroup render
  */
@@ -1664,10 +1674,10 @@ GHOSTTY_API bool ghostty_render_state_image_iterator_next(
  *        ghostty_render_state_image_iterator_next()
  * @param data The value to read
  * @param[out] out Pointer that receives the value
- * @return GHOSTTY_SUCCESS on success. GHOSTTY_NO_VALUE if `data` only
- *         applies to another protocol. GHOSTTY_INVALID_VALUE if the
- *         iterator is NULL, is not on a placement, or `data` is not a
- *         valid value.
+ * @return GHOSTTY_SUCCESS on success. GHOSTTY_NO_VALUE if `data` only applies
+ *         to another protocol. GHOSTTY_INVALID_VALUE if the iterator is NULL
+ *         or is not on a placement. GHOSTTY_UNSUPPORTED if `data` is not known
+ *         to this version of the library.
  *
  * @ingroup render
  */
@@ -1691,8 +1701,9 @@ GHOSTTY_API GhosttyResult ghostty_render_state_image_get(
  * @param values Output pointers, one for each key
  * @param[out] out_written If not NULL, receives the number of values
  *             written before any error
- * @return GHOSTTY_SUCCESS if every value was written, otherwise the
- *         error from the first value that failed
+ * @return GHOSTTY_SUCCESS if every key succeeds. Otherwise the result of the
+ *         first key that failed, for example GHOSTTY_UNSUPPORTED for a key
+ *         that is not known to this version of the library.
  *
  * @ingroup render
  */

@@ -55,11 +55,14 @@ pub const Data = enum(c_int) {
     placement_iterator = 1,
     generation = 2,
 
+    _,
+
     pub fn OutType(comptime self: Data) type {
         return switch (self) {
             .invalid => void,
             .placement_iterator => PlacementIterator,
             .generation => u64,
+            _ => void,
         };
     }
 };
@@ -80,6 +83,8 @@ pub const PlacementData = enum(c_int) {
     rows = 11,
     z = 12,
 
+    _,
+
     pub fn OutType(comptime self: PlacementData) type {
         return switch (self) {
             .invalid => void,
@@ -95,6 +100,7 @@ pub const PlacementData = enum(c_int) {
             .rows,
             => u32,
             .z => i32,
+            _ => void,
         };
     }
 };
@@ -108,6 +114,7 @@ pub fn get(
 
     return switch (data) {
         .invalid => .invalid_value,
+        _ => .unsupported,
         inline else => |comptime_data| getTyped(
             graphics_,
             comptime_data,
@@ -133,6 +140,7 @@ fn getTyped(
             };
         },
         .generation => out.* = storage.generation,
+        _ => comptime unreachable,
     }
     return .success;
 }
@@ -158,9 +166,12 @@ pub const PlacementLayer = enum(c_int) {
 pub const PlacementIteratorOption = enum(c_int) {
     layer = 0,
 
+    _,
+
     pub fn InType(comptime self: PlacementIteratorOption) type {
         return switch (self) {
             .layer => PlacementLayer,
+            _ => void,
         };
     }
 };
@@ -184,6 +195,8 @@ pub const ImageData = enum(c_int) {
     data_len = 8,
     generation = 9,
 
+    _,
+
     pub fn OutType(comptime self: ImageData) type {
         return switch (self) {
             .invalid => void,
@@ -193,6 +206,7 @@ pub const ImageData = enum(c_int) {
             .data_ptr => [*]const u8,
             .data_len => usize,
             .generation => u64,
+            _ => void,
         };
     }
 };
@@ -240,6 +254,7 @@ pub fn image_get(
 
     return switch (data) {
         .invalid => .invalid_value,
+        _ => .unsupported,
         inline else => |comptime_data| imageGetTyped(
             image_,
             comptime_data,
@@ -292,6 +307,7 @@ fn imageGetTyped(
         .data_ptr => out.* = (image.renderData().bytes() orelse return .no_value).ptr,
         .data_len => out.* = image.renderData().len(),
         .generation => out.* = image.generation,
+        _ => comptime unreachable,
     }
 
     return .success;
@@ -328,13 +344,8 @@ pub fn placement_iterator_set(
 ) callconv(lib.calling_conv) Result {
     if (comptime !build_options.kitty_graphics) return .no_value;
 
-    if (comptime std.debug.runtime_safety) {
-        _ = std.enums.fromInt(PlacementIteratorOption, @backingInt(option)) orelse {
-            return .invalid_value;
-        };
-    }
-
     return switch (option) {
+        _ => .unsupported,
         inline else => |comptime_option| placementIteratorSetTyped(
             iter_,
             comptime_option,
@@ -350,7 +361,9 @@ fn placementIteratorSetTyped(
 ) Result {
     const iter = iter_ orelse return .invalid_value;
     switch (option) {
-        .layer => iter.layer_filter = value.*,
+        .layer => iter.layer_filter = lib.enumFromPtr(PlacementLayer, value) orelse
+            return .invalid_value,
+        _ => comptime unreachable,
     }
     return .success;
 }
@@ -377,6 +390,7 @@ pub fn placement_get(
 
     return switch (data) {
         .invalid => .invalid_value,
+        _ => .unsupported,
         inline else => |comptime_data| placementGetTyped(
             iter_,
             comptime_data,
@@ -433,6 +447,7 @@ fn placementGetTyped(
         .columns => out.* = val.columns,
         .rows => out.* = val.rows,
         .z => out.* = val.z,
+        _ => comptime unreachable,
     }
 
     return .success;
@@ -568,6 +583,8 @@ pub const PlacementRenderInfo = extern struct {
     source_y: u32 = 0,
     source_width: u32 = 0,
     source_height: u32 = 0,
+
+    pub const sized_base = "source_height";
 };
 
 pub fn placement_render_info(
@@ -583,28 +600,26 @@ pub fn placement_render_info(
     const iter = iter_ orelse return .invalid_value;
     const entry = iter.entry orelse return .invalid_value;
     const out = out_ orelse return .invalid_value;
-    if (out.size < @sizeOf(PlacementRenderInfo)) return .invalid_value;
+    if (!lib.sizedCheck(.output, out)) return .invalid_value;
 
     const p = entry.value_ptr;
-
     const ps = p.pixelSize(image.*, wrapper.terminal);
-    out.pixel_width = ps.width;
-    out.pixel_height = ps.height;
-
     const gs = p.gridSize(image.*, wrapper.terminal);
-    out.grid_cols = gs.cols;
-    out.grid_rows = gs.rows;
-
     const vp = computeViewportPos(p, image, wrapper.terminal);
-    out.viewport_col = vp.col;
-    out.viewport_row = vp.row;
-    out.viewport_visible = vp.visible;
-
     const source = p.sourceRect(image.*);
-    out.source_x = source.x;
-    out.source_y = source.y;
-    out.source_width = source.width;
-    out.source_height = source.height;
+    lib.sizedWrite(out, .{
+        .pixel_width = ps.width,
+        .pixel_height = ps.height,
+        .grid_cols = gs.cols,
+        .grid_rows = gs.rows,
+        .viewport_col = vp.col,
+        .viewport_row = vp.row,
+        .viewport_visible = vp.visible,
+        .source_x = source.x,
+        .source_y = source.y,
+        .source_width = source.width,
+        .source_height = source.height,
+    });
 
     return .success;
 }
@@ -1689,6 +1704,22 @@ test "placement_render_info returns all fields" {
     try testing.expectEqual(0, ri.source_y);
     try testing.expectEqual(1, ri.source_width);
     try testing.expectEqual(2, ri.source_height);
+
+    // The size rule: below the base layout is rejected and nothing is
+    // written, exactly the base layout is enough, and a newer caller's
+    // tail is left untouched.
+    ri = .{ .size = lib.sizedBaseEnd(PlacementRenderInfo) - 1 };
+    try testing.expectEqual(Result.invalid_value, placement_render_info(iter, img, t, &ri));
+    try testing.expectEqual(0, ri.grid_cols);
+    ri = .{ .size = lib.sizedBaseEnd(PlacementRenderInfo) };
+    try testing.expectEqual(Result.success, placement_render_info(iter, img, t, &ri));
+    try testing.expectEqual(2, ri.source_height);
+    const Larger = extern struct { ri: PlacementRenderInfo, extra: [8]u8 };
+    var large: Larger = .{ .ri = .{ .size = @sizeOf(Larger) }, .extra = @splat(0xaa) };
+    try testing.expectEqual(Result.success, placement_render_info(iter, img, t, &large.ri));
+    try testing.expectEqual(@sizeOf(Larger), large.ri.size);
+    try testing.expectEqual(10, large.ri.grid_cols);
+    try testing.expectEqual(@as([8]u8, @splat(0xaa)), large.extra);
 
     const entry = iter.?.entry.?;
     const pin = switch (entry.value_ptr.location) {

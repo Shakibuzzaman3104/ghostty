@@ -129,6 +129,8 @@ pub const ClipboardWriteReply = extern struct {
     size: usize,
     result: clipboard.Write.Status,
     remember: bool,
+
+    pub const sized_base = "remember";
 };
 
 /// C function pointer type for replying to a clipboard write.
@@ -147,6 +149,8 @@ pub const ClipboardReadReply = extern struct {
     available: ?[*]const lib.String,
     available_len: usize,
     remember: bool,
+
+    pub const sized_base = "remember";
 };
 
 /// A synchronous request to read clipboard contents. The embedder answers
@@ -436,15 +440,18 @@ const Effects = struct {
     /// C function pointer type for the size callback. Used by XTWINOPS queries
     /// and VT-driven mode 2048 enable reports. Returns true and fills out_size
     /// if size is available, or false to suppress the XTWINOPS response or
-    /// mode 2048 report.
+    /// mode 2048 report. The library zeroes out_size before the call.
     pub const SizeFn = *const fn (Terminal, ?*anyopaque, *size_report.Size) callconv(lib.calling_conv) bool;
 
     /// C function pointer type for the device_attributes callback.
     /// Returns true and fills out_attrs if attributes are available,
-    /// or returns false to silently ignore the query.
+    /// or returns false to silently ignore the query. The library zeroes
+    /// out_attrs before the call.
     pub const DeviceAttributesFn = *const fn (Terminal, ?*anyopaque, *CDeviceAttributes) callconv(lib.calling_conv) bool;
 
-    /// C-compatible device attributes struct.
+    /// C-compatible device attributes struct. This struct is frozen. A
+    /// later version that needs more fields adds a new callback and
+    /// struct instead of changing this one.
     /// C: GhosttyDeviceAttributes
     pub const CDeviceAttributes = extern struct {
         primary: Primary,
@@ -529,6 +536,7 @@ const Effects = struct {
     ) callconv(lib.calling_conv) void {
         const ctx: *const ClipboardWriteCtx = @ptrCast(@alignCast(request.ctx));
         const write = ctx.write;
+        if (!lib.sizedCheck(.input, reply)) return write.reply(.unsupported);
         switch (reply.result) {
             .success => write.reply(.{ .success = .{ .remember = reply.remember } }),
             .denied => write.reply(.denied),
@@ -584,6 +592,7 @@ const Effects = struct {
     ) callconv(lib.calling_conv) void {
         const ctx: *const ClipboardReadCtx = @ptrCast(@alignCast(request.ctx));
         const read = ctx.read;
+        if (!lib.sizedCheck(.input, reply)) return read.reply(.unsupported);
         switch (reply.result) {
             .success => {},
             .denied => return read.reply(.denied),
@@ -652,17 +661,21 @@ const Effects = struct {
     fn colorSchemeTrampoline(handler: *Handler) ?device_status.ColorScheme {
         const wrapper = TerminalWrapper.fromHandler(handler);
         const func = wrapper.effects.color_scheme orelse return null;
-        var scheme: device_status.ColorScheme = undefined;
-        if (func(@ptrCast(wrapper), wrapper.effects.userdata, &scheme)) return scheme;
-        return null;
+        // Start from zero so a callback that returns true without writing
+        // reports light instead of garbage. The callback may still write
+        // a value that isn't a ColorScheme, which we treat as no answer.
+        var scheme: device_status.ColorScheme = std.mem.zeroes(device_status.ColorScheme);
+        if (!func(@ptrCast(wrapper), wrapper.effects.userdata, &scheme)) return null;
+        return lib.enumFromPtr(device_status.ColorScheme, &scheme);
     }
 
     fn deviceAttributesTrampoline(handler: *Handler) device_attributes.Attributes {
         const wrapper = TerminalWrapper.fromHandler(handler);
         const func = wrapper.effects.device_attributes_cb orelse return .{};
 
-        // Get our attributes from the callback.
-        var c_attrs: CDeviceAttributes = undefined;
+        // Get our attributes from the callback. Start from zero so any
+        // field the callback doesn't write reads as zero, not garbage.
+        var c_attrs: CDeviceAttributes = std.mem.zeroes(CDeviceAttributes);
         if (!func(@ptrCast(wrapper), wrapper.effects.userdata, &c_attrs)) return .{};
 
         // Note below we use a lot of enumFromInt but its always safe
@@ -826,7 +839,9 @@ const Effects = struct {
     fn sizeTrampoline(handler: *Handler) ?size_report.Size {
         const wrapper = TerminalWrapper.fromHandler(handler);
         const func = wrapper.effects.size_cb orelse return null;
-        var s: size_report.Size = undefined;
+        // Start from zero so any field the callback doesn't write reads
+        // as zero, not garbage.
+        var s: size_report.Size = std.mem.zeroes(size_report.Size);
         if (func(@ptrCast(wrapper), wrapper.effects.userdata, &s)) return s;
         return null;
     }
@@ -1141,6 +1156,8 @@ pub const WriteStop = extern struct {
     introducer: StringIntroducer = .esc,
     end: StringEnd = .st_esc,
     byte: u8 = 0,
+
+    pub const sized_base = "byte";
 };
 
 pub fn vt_write_until(
@@ -1151,10 +1168,10 @@ pub fn vt_write_until(
     out_: ?*WriteStop,
 ) callconv(lib.calling_conv) Result {
     const out = out_ orelse return .invalid_value;
-    if (out.size < @sizeOf(WriteStop)) return .invalid_value;
+    if (!lib.sizedCheck(.output, out)) return .invalid_value;
 
     // Reset every field so a reused struct never carries a previous stop.
-    out.* = .{};
+    lib.sizedWrite(out, .{});
 
     const wrapper = terminal_ orelse return .invalid_value;
     const input: []const u8 = if (ptr_) |ptr|
@@ -1167,24 +1184,27 @@ pub fn vt_write_until(
         return .invalid_value;
 
     const stop = wrapper.stream.nextSliceUntil(input, requested) orelse {
-        out.consumed = len;
+        lib.sizedSet(out, "consumed", len);
         return .no_value;
     };
 
-    out.consumed = stop.consumed;
-    out.reached = Boundary.bitsFromSet(stop.reached);
+    var result: WriteStop = .{
+        .consumed = stop.consumed,
+        .reached = Boundary.bitsFromSet(stop.reached),
+    };
     if (stop.start) |start| {
-        out.kind = start.kind;
-        out.introducer = start.introducer;
-        out.byte = start.byte;
+        result.kind = start.kind;
+        result.introducer = start.introducer;
+        result.byte = start.byte;
     }
     // When a byte both ends and starts a string, the end's kind wins;
     // see WriteStop.
     if (stop.end) |end| {
-        out.kind = end.kind;
-        out.end = end.reason;
-        out.byte = end.byte;
+        result.kind = end.kind;
+        result.end = end.reason;
+        result.byte = end.byte;
     }
+    lib.sizedWrite(out, result);
 
     return .success;
 }
@@ -1486,6 +1506,8 @@ pub const Option = enum(c_int) {
     program_status = 46,
     resize_window = 47,
 
+    _,
+
     /// Input type expected for setting the option.
     pub fn InType(comptime self: Option) type {
         return switch (self) {
@@ -1534,6 +1556,7 @@ pub const Option = enum(c_int) {
             .default_cursor_style => ?*const TerminalCursorStyle,
             .default_cursor_blink => ?*const bool,
             .mode, .mode_default => ?*const ModeConfig,
+            _ => void,
         };
     }
 };
@@ -1543,18 +1566,10 @@ pub fn set(
     option: Option,
     value: ?*const anyopaque,
 ) callconv(lib.calling_conv) Result {
-    if (comptime std.debug.runtime_safety) {
-        _ = std.enums.fromInt(Option, @backingInt(option)) orelse {
-            log.warn("terminal_set invalid option value={d}", .{@backingInt(option)});
-            return .invalid_value;
-        };
-    }
-
-    const wrapper = terminal_ orelse return .invalid_value;
-
     return switch (option) {
+        _ => .unsupported,
         inline else => |comptime_option| setTyped(
-            wrapper,
+            terminal_ orelse return .invalid_value,
             comptime_option,
             @ptrCast(@alignCast(value)),
         ),
@@ -1781,6 +1796,7 @@ fn setTyped(
                 else => unreachable,
             }
         },
+        _ => comptime unreachable,
     }
     return .success;
 }
@@ -1888,12 +1904,11 @@ pub const TerminalMemoryUsage = extern struct {
     alternate_compressed_bytes: u64 = 0,
     alternate_image_bytes: u64 = 0,
 
-    /// Gather the memory usage of `t`. The size field is set to
-    /// `caller_size` instead of our own size, so that copying the result
-    /// into the caller's struct keeps the size they passed in.
-    fn init(t: *const ZigTerminal, caller_size: usize) TerminalMemoryUsage {
+    pub const sized_base = "alternate_image_bytes";
+
+    /// Gather the memory usage of `t`.
+    fn init(t: *const ZigTerminal) TerminalMemoryUsage {
         var result: TerminalMemoryUsage = .{
-            .size = caller_size,
             .compression_supported = terminal_mem.canReclaim(.strict),
         };
 
@@ -1967,6 +1982,8 @@ pub const TerminalData = enum(c_int) {
     mouse_shape = 41,
     memory_usage = 42,
 
+    _,
+
     /// Output type expected for querying the data of the given kind.
     pub fn OutType(comptime self: TerminalData) type {
         return switch (self) {
@@ -2011,6 +2028,7 @@ pub const TerminalData = enum(c_int) {
             .selection => selection_c.CSelection,
             .mode => ModeConfig,
             .memory_usage => TerminalMemoryUsage,
+            _ => void,
         };
     }
 };
@@ -2020,16 +2038,10 @@ pub fn get(
     data: TerminalData,
     out: ?*anyopaque,
 ) callconv(lib.calling_conv) Result {
-    if (comptime std.debug.runtime_safety) {
-        _ = std.enums.fromInt(TerminalData, @backingInt(data)) orelse {
-            log.warn("terminal_get invalid data value={d}", .{@backingInt(data)});
-            return .invalid_value;
-        };
-    }
-
     const out_ptr = out orelse return .invalid_value;
 
     return switch (data) {
+        _ => .unsupported,
         .invalid => .invalid_value,
         inline else => |comptime_data| getTyped(
             terminal_,
@@ -2152,18 +2164,10 @@ fn getTyped(
         },
         .cursor_at_prompt => out.* = t.cursorIsAtPrompt(),
         .memory_usage => {
-            // A smaller size means the caller doesn't have every field of
-            // the first version of this struct, so reject it. A larger size
-            // means the caller was built against a newer version with more
-            // fields. We write only the fields we know and leave the rest
-            // alone.
-            //
-            // When fields are added later, compare against the size of the
-            // first version here, and copy only min(out.size, current size)
-            // bytes.
-            if (out.size < @sizeOf(TerminalMemoryUsage)) return .invalid_value;
-            out.* = .init(t, out.size);
+            if (!lib.sizedCheck(.output, out)) return .invalid_value;
+            lib.sizedWrite(out, .init(t));
         },
+        _ => comptime unreachable,
     }
 
     return .success;
@@ -2175,7 +2179,7 @@ pub fn grid_ref(
     out_ref: ?*grid_ref_c.CGridRef,
 ) callconv(lib.calling_conv) Result {
     const t: *ZigTerminal = (terminal_ orelse return .invalid_value).terminal;
-    const zig_pt: point.Point = .fromC(pt);
+    const zig_pt = point.Point.fromC(pt) orelse return .invalid_value;
     const p = t.screens.active.pages.pin(zig_pt) orelse
         return .invalid_value;
     if (out_ref) |out| out.* = grid_ref_c.CGridRef.fromPin(p);
@@ -2193,7 +2197,8 @@ pub fn grid_ref_track(
 
     const t: *ZigTerminal = wrapper.terminal;
     const list = &t.screens.active.pages;
-    const p = list.pin(.fromC(pt)) orelse return .invalid_value;
+    const p = list.pin(point.Point.fromC(pt) orelse return .invalid_value) orelse
+        return .invalid_value;
     const tracked_pin = list.trackPin(p) catch return .out_of_memory;
 
     const alloc = t.gpa();
@@ -3636,14 +3641,44 @@ test "vt_write_until result contract" {
         vt_write_until(t, "x", 1, ground, null),
     );
 
-    // A struct one byte short is rejected and left untouched.
+    // A struct one byte short of the base layout is rejected and left
+    // untouched.
     stop = stale;
-    stop.size = @sizeOf(WriteStop) - 1;
+    stop.size = lib.sizedBaseEnd(WriteStop) - 1;
     try testing.expectEqual(
         Result.invalid_value,
         vt_write_until(t, "x", 1, ground, &stop),
     );
     try testing.expectEqual(@as(usize, 99), stop.consumed);
+
+    // Exactly the base layout is enough.
+    stop = stale;
+    stop.size = lib.sizedBaseEnd(WriteStop);
+    try testing.expectEqual(
+        Result.success,
+        vt_write_until(t, "x", 1, ground | apc_end, &stop),
+    );
+    try testing.expectEqual(WriteStop{ .size = lib.sizedBaseEnd(WriteStop), .reached = ground }, stop);
+
+    // A newer caller's tail is left untouched, on success and on no_value.
+    {
+        const Larger = extern struct { stop: WriteStop, extra: [8]u8 };
+        var large: Larger = .{ .stop = stale, .extra = @splat(0xaa) };
+        large.stop.size = @sizeOf(Larger);
+        try testing.expectEqual(
+            Result.success,
+            vt_write_until(t, "x", 1, ground | apc_end, &large.stop),
+        );
+        try testing.expectEqual(WriteStop{ .size = @sizeOf(Larger), .reached = ground }, large.stop);
+        try testing.expectEqual(@as([8]u8, @splat(0xaa)), large.extra);
+
+        try testing.expectEqual(
+            Result.no_value,
+            vt_write_until(t, "x", 1, apc_end, &large.stop),
+        );
+        try testing.expectEqual(@as(usize, 1), large.stop.consumed);
+        try testing.expectEqual(@as([8]u8, @splat(0xaa)), large.extra);
+    }
 
     // Already at ground with ground requested consumes nothing.
     stop = stale;
@@ -4591,8 +4626,43 @@ test "selection derivation helpers" {
 
     try testing.expectEqual(Result.no_value, selection_c.output(t, line_ref, &out));
 
-    line_opts.size = @sizeOf(usize) - 1;
+    // The size rule for the three option structs: below the base layout
+    // is rejected, a newer caller's zero tail is accepted and a non-zero
+    // tail is rejected.
+    line_opts.size = lib.sizedBaseEnd(selection_c.SelectLineOptions) - 1;
     try testing.expectEqual(Result.invalid_value, selection_c.line(t, &line_opts, &out));
+    line_opts.size = lib.sizedBaseEnd(selection_c.SelectLineOptions);
+    try testing.expectEqual(Result.success, selection_c.line(t, &line_opts, &out));
+    {
+        const LargerLine = extern struct { opts: selection_c.SelectLineOptions, extra: [8]u8 };
+        var large: LargerLine = .{ .opts = .{ .ref = line_ref }, .extra = @splat(0) };
+        large.opts.size = @sizeOf(LargerLine);
+        try testing.expectEqual(Result.success, selection_c.line(t, &large.opts, &out));
+        large.extra[7] = 1;
+        try testing.expectEqual(Result.invalid_value, selection_c.line(t, &large.opts, &out));
+
+        const LargerWord = extern struct { opts: selection_c.SelectWordOptions, extra: [8]u8 };
+        var word: LargerWord = .{ .opts = .{ .ref = word_ref }, .extra = @splat(0) };
+        word.opts.size = lib.sizedBaseEnd(selection_c.SelectWordOptions) - 1;
+        try testing.expectEqual(Result.invalid_value, selection_c.word(t, &word.opts, &out));
+        word.opts.size = @sizeOf(selection_c.SelectWordOptions);
+        try testing.expectEqual(Result.success, selection_c.word(t, &word.opts, &out));
+        word.opts.size = @sizeOf(LargerWord);
+        try testing.expectEqual(Result.success, selection_c.word(t, &word.opts, &out));
+        word.extra[0] = 1;
+        try testing.expectEqual(Result.invalid_value, selection_c.word(t, &word.opts, &out));
+
+        const LargerBetween = extern struct { opts: selection_c.SelectWordBetweenOptions, extra: [8]u8 };
+        var between: LargerBetween = .{ .opts = word_between_opts, .extra = @splat(0) };
+        between.opts.size = lib.sizedBaseEnd(selection_c.SelectWordBetweenOptions) - 1;
+        try testing.expectEqual(Result.invalid_value, selection_c.word_between(t, &between.opts, &out));
+        between.opts.size = @sizeOf(selection_c.SelectWordBetweenOptions);
+        try testing.expectEqual(Result.success, selection_c.word_between(t, &between.opts, &out));
+        between.opts.size = @sizeOf(LargerBetween);
+        try testing.expectEqual(Result.success, selection_c.word_between(t, &between.opts, &out));
+        between.extra[0] = 1;
+        try testing.expectEqual(Result.invalid_value, selection_c.word_between(t, &between.opts, &out));
+    }
     try testing.expectEqual(Result.invalid_value, selection_c.word(t, null, &out));
     try testing.expectEqual(Result.invalid_value, selection_c.word(t, &word_opts, null));
     try testing.expectEqual(Result.invalid_value, selection_c.word_between(t, null, &out));
@@ -6379,6 +6449,8 @@ test "kitty clipboard write via C effects" {
         var last_granted: bool = true;
         var last_can_remember: bool = true;
         var next_remember: bool = false;
+        var reply_size: usize = @sizeOf(ClipboardWriteReply);
+        var reply_tail: u8 = 0;
 
         fn writePty(
             _: Terminal,
@@ -6414,11 +6486,16 @@ test "kitty clipboard write via C effects" {
             }
             last_granted = request.granted;
             last_can_remember = request.can_remember;
-            request.reply(request, &.{
-                .size = @sizeOf(ClipboardWriteReply),
-                .result = .success,
-                .remember = next_remember,
-            });
+            var reply: extern struct { reply: ClipboardWriteReply, tail: [8]u8 } = .{
+                .reply = .{
+                    .size = reply_size,
+                    .result = .success,
+                    .remember = next_remember,
+                },
+                .tail = @splat(0),
+            };
+            reply.tail[7] = reply_tail;
+            request.reply(request, &reply.reply);
         }
     };
     S.responses_len = 0;
@@ -6480,11 +6557,38 @@ test "kitty clipboard write via C effects" {
     );
     S.next_remember = false;
 
+    // The reply's size is checked: a reply that fails the check is
+    // unsupported (ENOSYS).
+    const ReplyCase = struct { size: usize, tail: u8, status: []const u8 };
+    const reply_cases = [_]ReplyCase{
+        .{ .size = lib.sizedBaseEnd(ClipboardWriteReply) - 1, .tail = 0, .status = "ENOSYS" },
+        .{ .size = lib.sizedBaseEnd(ClipboardWriteReply), .tail = 0, .status = "DONE" },
+        .{ .size = @sizeOf(ClipboardWriteReply) + 8, .tail = 0, .status = "DONE" },
+        .{ .size = @sizeOf(ClipboardWriteReply) + 8, .tail = 1, .status = "ENOSYS" },
+    };
+    for (reply_cases) |case| {
+        S.reply_size = case.size;
+        S.reply_tail = case.tail;
+        S.responses_len = 0;
+        const size_seqs = [_][]const u8{
+            "\x1B]5522;type=write:id=s1\x1B\\",
+            "\x1B]5522;type=wdata\x1B\\",
+        };
+        for (size_seqs) |seq| vt_write(t, seq.ptr, seq.len);
+        var expected: [64]u8 = undefined;
+        try testing.expectEqualStrings(
+            try std.fmt.bufPrint(&expected, "\x1B]5522;type=write:status={s}:id=s1\x1B\\", .{case.status}),
+            S.responses[0..S.responses_len],
+        );
+    }
+    S.reply_size = @sizeOf(ClipboardWriteReply);
+    S.reply_tail = 0;
+
     // Without a read callback reads are denied.
     S.responses_len = 0;
     const read = "\x1B]5522;type=read:id=r1;dGV4dC9wbGFpbg==\x1B\\";
     vt_write(t, read, read.len);
-    try testing.expectEqual(@as(usize, 3), S.write_count);
+    try testing.expectEqual(@as(usize, 7), S.write_count);
     try testing.expectEqualStrings(
         "\x1B]5522;type=read:status=EPERM:id=r1\x1B\\",
         S.responses[0..S.responses_len],
@@ -6662,6 +6766,8 @@ test "set clipboard_read callback" {
         var last_granted: bool = true;
         var last_can_remember: bool = true;
         var result: clipboard.Read.Status = .success;
+        var reply_size: usize = @sizeOf(ClipboardReadReply);
+        var reply_tail: u8 = 0;
 
         fn deinit() void {
             if (last_data) |d| testing.allocator.free(d);
@@ -6698,15 +6804,20 @@ test "set clipboard_read callback" {
                 .mime = .init(mime),
                 .data = .init(data),
             }};
-            request.reply(request, &.{
-                .size = @sizeOf(ClipboardReadReply),
-                .result = result,
-                .contents = &contents,
-                .contents_len = contents.len,
-                .available = null,
-                .available_len = 0,
-                .remember = false,
-            });
+            var reply: extern struct { reply: ClipboardReadReply, tail: [8]u8 } = .{
+                .reply = .{
+                    .size = reply_size,
+                    .result = result,
+                    .contents = &contents,
+                    .contents_len = contents.len,
+                    .available = null,
+                    .available_len = 0,
+                    .remember = false,
+                },
+                .tail = @splat(0),
+            };
+            reply.tail[7] = reply_tail;
+            request.reply(request, &reply.reply);
         }
     };
     defer S.deinit();
@@ -6740,6 +6851,28 @@ test "set clipboard_read callback" {
     vt_write(t, read_st, read_st.len);
     try testing.expectEqual(2, S.count);
     try testing.expectEqualStrings("\x1B]52;c;\x1B\\", S.last_data.?);
+
+    // The reply's size is checked: a reply that fails the check is
+    // unsupported, which also answers with an empty clipboard.
+    S.result = .success;
+    const ReplyCase = struct { size: usize, tail: u8, ok: bool };
+    const reply_cases = [_]ReplyCase{
+        .{ .size = lib.sizedBaseEnd(ClipboardReadReply) - 1, .tail = 0, .ok = false },
+        .{ .size = lib.sizedBaseEnd(ClipboardReadReply), .tail = 0, .ok = true },
+        .{ .size = @sizeOf(ClipboardReadReply) + 8, .tail = 0, .ok = true },
+        .{ .size = @sizeOf(ClipboardReadReply) + 8, .tail = 1, .ok = false },
+    };
+    for (reply_cases) |case| {
+        S.reply_size = case.size;
+        S.reply_tail = case.tail;
+        vt_write(t, read_st, read_st.len);
+        try testing.expectEqualStrings(
+            if (case.ok) "\x1B]52;c;aGVsbG8=\x1B\\" else "\x1B]52;c;\x1B\\",
+            S.last_data.?,
+        );
+    }
+    S.reply_size = @sizeOf(ClipboardReadReply);
+    S.reply_tail = 0;
 
     // Clearing the callback uninstalls the handler effect.
     try testing.expectEqual(Result.success, set(t, .clipboard_read, null));
@@ -6785,17 +6918,19 @@ test "set size callback" {
             last_data = testing.allocator.dupe(u8, ptr[0..len]) catch @panic("OOM");
         }
 
+        var arrived: ?size_report.Size = null;
+
         fn sizeCb(_: Terminal, _: ?*anyopaque, out_size: *size_report.Size) callconv(lib.calling_conv) bool {
-            out_size.* = .{
-                .rows = 24,
-                .columns = 80,
-                .cell_width = 8,
-                .cell_height = 16,
-            };
+            arrived = out_size.*;
+            out_size.rows = 24;
+            out_size.columns = 80;
+            out_size.cell_width = 8;
+            out_size.cell_height = 16;
             return true;
         }
     };
     defer S.deinit();
+    S.arrived = null;
 
     try testing.expectEqual(Result.success, set(t, .write_pty, @ptrCast(&S.writePty)));
     try testing.expectEqual(Result.success, set(t, .size_cb, @ptrCast(&S.sizeCb)));
@@ -6804,6 +6939,9 @@ test "set size callback" {
     vt_write(t, "\x1B[18t", 5);
     try testing.expect(S.last_data != null);
     try testing.expectEqualStrings("\x1b[8;24;80t", S.last_data.?);
+
+    // The callback got a zeroed struct.
+    try testing.expectEqual(std.mem.zeroes(size_report.Size), S.arrived.?);
 }
 
 test "size without callback is silent" {
@@ -6946,7 +7084,10 @@ test "set device_attributes callback primary" {
             last_data = testing.allocator.dupe(u8, ptr[0..len]) catch @panic("OOM");
         }
 
+        var arrived: ?Effects.CDeviceAttributes = null;
+
         fn da(_: Terminal, _: ?*anyopaque, out: *Effects.CDeviceAttributes) callconv(lib.calling_conv) bool {
+            arrived = out.*;
             var features: [64]u16 = @splat(0);
             features[0] = 22;
             features[1] = 52;
@@ -6968,6 +7109,7 @@ test "set device_attributes callback primary" {
         }
     };
     defer S.deinit();
+    S.arrived = null;
 
     try testing.expectEqual(Result.success, set(t, .write_pty, @ptrCast(&S.writePty)));
     try testing.expectEqual(Result.success, set(t, .device_attributes, @ptrCast(&S.da)));
@@ -6976,6 +7118,9 @@ test "set device_attributes callback primary" {
     vt_write(t, "\x1B[c", 3);
     try testing.expect(S.last_data != null);
     try testing.expectEqualStrings("\x1b[?64;22;52c", S.last_data.?);
+
+    // The callback got a zeroed struct.
+    try testing.expectEqualDeep(std.mem.zeroes(Effects.CDeviceAttributes), S.arrived.?);
 }
 
 test "set device_attributes callback secondary" {
