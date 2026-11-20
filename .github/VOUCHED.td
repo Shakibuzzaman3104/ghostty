@@ -52,6 +52,7 @@ andrejdaskalov
 anhthang
 anmitalidev
 anthonyzhoon
+aohanhongzhi
 aprilnea
 arc-source-coder
 aredmondd
@@ -94,6 +95,7 @@ clemg
 clinta
 cmwetherell
 complexsplit
+craig-b
 crayxt
 craziestowl
 -creativision meatproxying
@@ -111,6 +113,7 @@ dariogriffo
 database64128
 dave92082
 davey-hughes
+davidbrochart
 davidhodge
 -davidpmclaughlin Refusing to follow AI policy and exhibit good faith behavior
 davidsanchez222
@@ -235,6 +238,7 @@ konstantinhudyakov
 koranir
 korikhin
 kostich
+krios2146
 kristina8888
 kristofersoler
 kylesower
@@ -274,12 +278,14 @@ minorcell
 misairuzame
 mischief
 mistertea
+-misterwanted holy meat proxy
 mitchellh
 miupa
 mjbommar
 mlabbe
 mohshami
 molechowski
+montmejat
 moonmao42
 moonward
 -morgengeluk Appears to be using AI inappropriately even after it was requested they abide by the AI policy (there is clear evidence of the person-in-the-loop not attempting to clean up AI generated text, and their AI disclosure itself reads like AI-generated text and shows no signs of remorse or intent to improve).
@@ -311,6 +317,7 @@ ocean6954
 ollieatkinson
 ollioddi
 olrtg
+orion0616
 oshdubh
 otomn
 paaloeye
@@ -390,6 +397,7 @@ tasselx
 tbrundige
 tdgroot
 tdslot
+teddytennant
 thapakrish
 thirstycrow
 -thomas-trijindev No human in the loop
