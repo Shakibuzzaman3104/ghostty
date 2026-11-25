@@ -16,6 +16,7 @@ const Application = @import("application.zig").Application;
 const SplitTree = @import("split_tree.zig").SplitTree;
 const Surface = @import("surface.zig").Surface;
 const TitleDialog = @import("title_dialog.zig").TitleDialog;
+const tab_color_swatch = @import("tab_color_swatch.zig");
 const Overrides = @import("Overrides.zig");
 
 const log = std.log.scoped(.gtk_ghostty_window);
@@ -169,6 +170,9 @@ pub const Tab = extern struct {
         /// The tooltip of this tab. This is usually bound to the active surface.
         tooltip: ?[:0]const u8 = null,
 
+        /// Color chosen from the tab context menu, or null for none.
+        tab_color: ?adw.AccentColor = null,
+
         // Template bindings
         split_tree: *SplitTree,
 
@@ -264,6 +268,27 @@ pub const Tab = extern struct {
         const title = std.mem.span(title_ptr);
         self.setTitleOverride(if (title.len == 0) null else title);
     }
+
+    pub fn getTabColor(self: *Self) ?adw.AccentColor {
+        return self.private().tab_color;
+    }
+
+    pub fn setTabColor(self: *Self, color: ?adw.AccentColor) void {
+        self.private().tab_color = color;
+        self.syncColorIndicator();
+    }
+
+    pub fn syncColorIndicator(self: *Self) void {
+        const page = self.getTabPage() orelse return;
+        const color = self.private().tab_color orelse {
+            page.setIndicatorIcon(null);
+            return;
+        };
+        const texture = tab_color_swatch.createIndicatorIcon(color);
+        defer texture.unref();
+        page.setIndicatorIcon(texture.as(gio.Icon));
+    }
+
     pub fn promptTabTitle(self: *Self) void {
         const priv = self.private();
         const dialog = TitleDialog.new(.tab, priv.title_override orelse priv.title);
