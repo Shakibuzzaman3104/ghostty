@@ -97,10 +97,10 @@
       url = "https://deps.files.ghostty.org/N-V-__8AAEbOfQBnvcFcCX2W5z7tDaN8vaNZGamEQtNOe0UI.tar.gz";
       hash = "sha256-/jVT7+874LCeSF/pdNVTFoSOfRisSqxCJnt5/SGCXPQ=";
     };
-    "N-V-__8AAFpzBgAPo4OIKKdP0WTD6scDoaBGVGTdltSyA2Hp" = fetchzip {
+    "N-V-__8AAOKfBgBcBqShv-jh_C8RXUqrDNKgVeJTe4ZiQROr" = fetchzip {
       name = "iterm2_themes";
-      url = "https://deps.files.ghostty.org/ghostty-themes-release-20261102-150615-3d8a6a1.tgz";
-      hash = "sha256-TruNOlHhKdNDrsxbWm7UX6mRuu/o6gCIDNJQ5Hm6vI8=";
+      url = "https://deps.files.ghostty.org/ghostty-themes-release-20261116-150709-494b809.tgz";
+      hash = "sha256-Uj0s3MOPzUtB6/PC5ptffRKojgatfYEn8owlw3jSyQM=";
     };
     "N-V-__8AAIC5lwAVPJJzxnCAahSvZTIlG-HhtOvnM1uh-66x" = fetchurl {
       url = "https://deps.files.ghostty.org/JetBrainsMono-2.304.tar.gz";

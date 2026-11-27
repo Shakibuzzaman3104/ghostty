@@ -1,5 +1,6 @@
 const std = @import("std");
 const adw = @import("adw");
+const gdk = @import("gdk");
 const gio = @import("gio");
 const glib = @import("glib");
 const gobject = @import("gobject");
@@ -16,6 +17,7 @@ const Application = @import("application.zig").Application;
 const SplitTree = @import("split_tree.zig").SplitTree;
 const Surface = @import("surface.zig").Surface;
 const TitleDialog = @import("title_dialog.zig").TitleDialog;
+const tab_color_swatch = @import("tab_color_swatch.zig");
 const Overrides = @import("Overrides.zig");
 
 const log = std.log.scoped(.gtk_ghostty_window);
@@ -169,6 +171,13 @@ pub const Tab = extern struct {
         /// The tooltip of this tab. This is usually bound to the active surface.
         tooltip: ?[:0]const u8 = null,
 
+        /// Color chosen from the tab context menu, or null for none.
+        tab_color: ?adw.AccentColor = null,
+
+        /// Indicator icon rendered for `tab_color`, kept so that it is only
+        /// rendered when the color changes.
+        tab_color_icon: ?*gdk.Texture = null,
+
         // Template bindings
         split_tree: *SplitTree,
 
@@ -264,6 +273,29 @@ pub const Tab = extern struct {
         const title = std.mem.span(title_ptr);
         self.setTitleOverride(if (title.len == 0) null else title);
     }
+
+    pub fn getTabColor(self: *Self) ?adw.AccentColor {
+        return self.private().tab_color;
+    }
+
+    pub fn setTabColor(self: *Self, color: ?adw.AccentColor) void {
+        const priv = self.private();
+        if (priv.tab_color == color) return;
+        priv.tab_color = color;
+        if (priv.tab_color_icon) |v| v.unref();
+        priv.tab_color_icon = if (color) |c| tab_color_swatch.createIndicatorIcon(c) else null;
+        self.syncColorIndicator();
+    }
+
+    pub fn syncColorIndicator(self: *Self) void {
+        const page = self.getTabPage() orelse return;
+        const icon = self.private().tab_color_icon orelse {
+            page.setIndicatorIcon(null);
+            return;
+        };
+        page.setIndicatorIcon(icon.as(gio.Icon));
+    }
+
     pub fn promptTabTitle(self: *Self) void {
         const priv = self.private();
         const dialog = TitleDialog.new(.tab, priv.title_override orelse priv.title);
@@ -325,6 +357,10 @@ pub const Tab = extern struct {
         if (priv.config) |v| {
             v.unref();
             priv.config = null;
+        }
+        if (priv.tab_color_icon) |v| {
+            v.unref();
+            priv.tab_color_icon = null;
         }
 
         gtk.Widget.disposeTemplate(
