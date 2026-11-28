@@ -92,7 +92,7 @@ pub fn init(b: *std.Build, cfg: *const Config) !SharedDeps {
         .config = cfg,
         .help_strings = try .init(b, cfg),
         .unicode_tables = try .init(b, uucode_tables),
-        .framedata = if (cfg.emit_lib_vt and !cfg.emit_bench)
+        .framedata = if (cfg.emit_lib_vt and !cfg.emit_bench and !cfg.emit_exe)
             null
         else
             try .init(b),
@@ -730,6 +730,7 @@ fn addGtk(
         .{ "glibunix", "glibunix2" },
         .{ "gobject", "gobject2" },
         .{ "graphene", "graphene1" },
+        .{ "gsk", "gsk4" },
         .{ "gtk", "gtk4" },
         .{ "xlib", "xlib2" },
     };
